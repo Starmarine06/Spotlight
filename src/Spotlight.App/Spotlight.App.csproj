@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3967.48" />
+    <PackageReference Include="System.Data.OleDb" Version="10.0.8" />
+    <PackageReference Include="System.Drawing.Common" Version="10.0.8" />
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="10.0.8" />
+  </ItemGroup>
+
+  <!-- Auto build React UI when building in Release configuration -->
+  <Target Name="BuildFrontend" BeforeTargets="BeforeBuild" Condition="'$(Configuration)' == 'Release'">
+    <Message Text="Building React frontend UI..." Importance="high" />
+    <Exec Command="npm run build" WorkingDirectory="..\Spotlight.UI" />
+  </Target>
+
+  <!-- Copy frontend files dynamically after build to output and publish directories -->
+  <Target Name="CopyFrontendToOutput" AfterTargets="BuildFrontend" Condition="'$(Configuration)' == 'Release'">
+    <ItemGroup>
+      <FrontendFiles Include="..\Spotlight.UI\dist\**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(FrontendFiles)" 
+          DestinationFiles="@(FrontendFiles->'$(OutputPath)ui\%(RecursiveDir)%(Filename)%(Extension)')" 
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(FrontendFiles)" 
+          DestinationFiles="@(FrontendFiles->'$(PublishDir)ui\%(RecursiveDir)%(Filename)%(Extension)')" 
+          SkipUnchangedFiles="true" 
+          Condition="'$(PublishDir)' != ''" />
+  </Target>
+</Project>
