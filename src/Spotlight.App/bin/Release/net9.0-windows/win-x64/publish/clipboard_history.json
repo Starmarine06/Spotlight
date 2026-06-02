@@ -1,5 +1,25 @@
 [
   {
+    "FullText": "Git:\nopen(\u0022src/Spotlight.App/bin/Release/net9.0-windows/win-x64/publish/Spotlight.App.exe ....\nPermission denied",
+    "Timestamp": "2026-06-02 20:06:37"
+  },
+  {
+    "FullText": "git config --global core.autocrlf false",
+    "Timestamp": "2026-06-02 20:06:06"
+  },
+  {
+    "FullText": "git config --global core.autocrlf input",
+    "Timestamp": "2026-06-02 20:06:02"
+  },
+  {
+    "FullText": "git config --global core.autocrlf true",
+    "Timestamp": "2026-06-02 20:05:56"
+  },
+  {
+    "FullText": "Git: warning: in the working copy of \u0027.gitignore\u0027, LF will be replaced by CRLF the next time Git\ntouches it",
+    "Timestamp": "2026-06-02 20:05:38"
+  },
+  {
     "FullText": "fd --type f --max-results 20 \u003Cquery\u003E --search-path \u003Cdirectory\u003E",
     "Timestamp": "2026-06-02 19:48:53"
   },
