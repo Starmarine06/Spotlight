@@ -2,3 +2,6 @@
 /install.ps1
 /setup.bat
 /Spotlight.sln
+src/Spotlight.App/bin/Release/net9.0-windows/win-x64/publish/Spotlight.App.exe.WebView2/EBWebView/Default/Sync Data/LevelDB/LOG
+src/Spotlight.App/bin/Release/net9.0-windows/win-x64/publish/Spotlight.App.exe.WebView2/EBWebView/Default/Site Characteristics Database/LOG
+src/Spotlight.App/bin/Release/net9.0-windows/win-x64/publish/Spotlight.App.exe.WebView2/EBWebView/Default/shared_proto_db/metadata/LOG
