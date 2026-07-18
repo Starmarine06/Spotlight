@@ -21,6 +21,13 @@
     <Exec Command="npm run build" WorkingDirectory="..\Spotlight.UI" />
   </Target>
 
+  <!-- Build Spotlight.Setup project and copy to output/publish directory -->
+  <Target Name="BuildSetup" AfterTargets="Build">
+    <Message Text="Building Spotlight.Setup updater..." Importance="high" />
+    <Exec Command="dotnet publish ..\Spotlight.Setup\Spotlight.Setup.csproj -c $(Configuration) -r win-x64 --self-contained false -o &quot;$(OutputPath)&quot;" />
+    <Exec Command="dotnet publish ..\Spotlight.Setup\Spotlight.Setup.csproj -c $(Configuration) -r win-x64 --self-contained false -o &quot;$(PublishDir)&quot;" Condition="'$(PublishDir)' != ''" />
+  </Target>
+
   <!-- Copy frontend files dynamically after build to output and publish directories -->
   <Target Name="CopyFrontendToOutput" AfterTargets="BuildFrontend" Condition="'$(Configuration)' == 'Release'">
     <ItemGroup>

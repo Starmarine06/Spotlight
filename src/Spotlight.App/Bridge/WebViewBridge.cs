@@ -213,6 +213,62 @@ public class WebViewBridge
                         }
                     }
                     break;
+                case "trigger_update":
+                    if (root.TryGetProperty("downloadUrl", out var dlUrlProp))
+                    {
+                        var downloadUrl = dlUrlProp.GetString();
+                        if (!string.IsNullOrEmpty(downloadUrl))
+                        {
+                            _ = Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    var tempZip = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "SpotlightUpdate.zip");
+                                    if (System.IO.File.Exists(tempZip))
+                                    {
+                                        System.IO.File.Delete(tempZip);
+                                    }
+
+                                    using var client = new System.Net.Http.HttpClient();
+                                    client.DefaultRequestHeaders.UserAgent.ParseAdd("Spotlight-App");
+                                    
+                                    using var response = await client.GetAsync(downloadUrl);
+                                    response.EnsureSuccessStatusCode();
+                                    
+                                    using (var fs = new System.IO.FileStream(tempZip, System.IO.FileMode.Create, System.IO.FileAccess.Write, System.IO.FileShare.None))
+                                    {
+                                        await response.Content.CopyToAsync(fs);
+                                    }
+
+                                    var currentBase = AppDomain.CurrentDomain.BaseDirectory;
+                                    var setupExe = System.IO.Path.Combine(currentBase, "Spotlight.Setup.exe");
+                                    if (System.IO.File.Exists(setupExe))
+                                    {
+                                        var psi = new System.Diagnostics.ProcessStartInfo(setupExe, $"update \"{tempZip}\"")
+                                        {
+                                            UseShellExecute = true,
+                                            WorkingDirectory = currentBase
+                                        };
+                                        System.Diagnostics.Process.Start(psi);
+                                        
+                                        _mainWindow.Dispatcher.Invoke(() =>
+                                        {
+                                            System.Windows.Application.Current.Shutdown();
+                                        });
+                                    }
+                                    else
+                                    {
+                                        System.Windows.MessageBox.Show("Spotlight.Setup.exe updater was not found. Please install the update manually.", "Update Error", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    System.Windows.MessageBox.Show($"Update download failed: {ex.Message}", "Update Error", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
+                                }
+                            });
+                        }
+                    }
+                    break;
 
                 case "hide":
                     _mainWindow.HideWindow();
