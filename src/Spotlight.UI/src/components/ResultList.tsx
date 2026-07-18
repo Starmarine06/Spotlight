@@ -77,6 +77,18 @@ export const ResultList: React.FC<ResultListProps> = ({ items, activeIndex, onIt
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
           </svg>
         );
+      case "wifi":
+        return (
+          <svg className="item-icon" style={{ color: "#60a5fa" }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19h.01M5.978 13A8.995 8.995 0 0112 10c2.51 0 4.778 1.026 6.022 2.684M3.078 8A13.978 13.978 0 0112 5c3.897 0 7.42 1.59 9.922 4.15" />
+          </svg>
+        );
+      case "bluetooth":
+        return (
+          <svg className="item-icon" style={{ color: "#3b82f6" }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 7l10 10-5 5V2l5 5L7 17" />
+          </svg>
+        );
       case "settings":
         return (
           <svg className="item-icon" style={{ color: "#a8a29e" }} fill="none" viewBox="0 0 24 24" stroke="currentColor">

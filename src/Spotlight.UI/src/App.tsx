@@ -20,18 +20,25 @@ const DEFAULT_SYSTEM_ACTIONS: SystemSearchItem[] = [
 ];
 
 const WINDOWS_SETTINGS: SystemSearchItem[] = [
+  { type: "system", name: "Wi-Fi Settings", path: "ms-settings:network-wifi", command: "ms-settings:network-wifi", description: "Manage Wi-Fi networks and connection settings", iconName: "wifi" },
+  { type: "system", name: "Bluetooth Settings", path: "ms-settings:bluetooth", command: "ms-settings:bluetooth", description: "Manage Bluetooth devices, pairing, and discovery", iconName: "bluetooth" },
   { type: "system", name: "Windows Update", path: "ms-settings:windowsupdate", command: "ms-settings:windowsupdate", description: "Check for updates, view update history", iconName: "settings" },
   { type: "system", name: "Display Settings", path: "ms-settings:display", command: "ms-settings:display", description: "Brightness, resolution, multiple screens", iconName: "settings" },
   { type: "system", name: "Network & Internet", path: "ms-settings:network", command: "ms-settings:network", description: "Wi-Fi, Ethernet, VPN, data usage", iconName: "settings" },
   { type: "system", name: "Personalization", path: "ms-settings:personalization", command: "ms-settings:personalization", description: "Background, lock screen, themes, colors", iconName: "settings" },
   { type: "system", name: "Apps & Features", path: "ms-settings:appsfeatures", command: "ms-settings:appsfeatures", description: "Uninstall apps, default apps, optional features", iconName: "settings" },
-  { type: "system", name: "Bluetooth & Devices", path: "ms-settings:bluetooth", command: "ms-settings:bluetooth", description: "Pair devices, printers, mouse, keyboard", iconName: "settings" },
   { type: "system", name: "Power & Sleep", path: "ms-settings:power", command: "ms-settings:power", description: "Screen timeout, sleep settings, battery", iconName: "settings" },
-  { type: "system", name: "Sound Settings", path: "ms-settings:sound", command: "ms-settings:sound", description: "Output devices, input devices, volume mixer", iconName: "settings" }
+  { type: "system", name: "Sound Settings", path: "ms-settings:sound", command: "ms-settings:sound", description: "Output devices, input devices, volume mixer", iconName: "settings" },
+  { type: "system", name: "Notification Settings", path: "ms-settings:notifications", command: "ms-settings:notifications", description: "Manage alerts, notifications, and sender options", iconName: "settings" },
+  { type: "system", name: "Storage Settings", path: "ms-settings:storagesense", command: "ms-settings:storagesense", description: "Check storage usage, clean temporary files", iconName: "settings" },
+  { type: "system", name: "Date & Time Settings", path: "ms-settings:dateandtime", command: "ms-settings:dateandtime", description: "Adjust date, time zone, and language settings", iconName: "settings" }
 ];
+
+const CURRENT_VERSION = "1.0.0";
 
 export default function App() {
   const [searchQuery, setSearchQuery] = useState("");
+  const [updateInfo, setUpdateInfo] = useState<{ version: string; downloadUrl: string; notes: string } | null>(null);
   const [apps, setApps] = useState<AppSearchItem[]>([]);
   const [fileResults, setFileResults] = useState<FileSearchItem[]>([]);
   const [services, setServices] = useState<ServiceSearchItem[]>([]);
@@ -162,6 +169,33 @@ export default function App() {
     bridge.send("init");
     refreshHistory();
 
+    // Check for latest updates on GitHub Releases
+    fetch("https://api.github.com/repos/Starmarine06/Spotlight/releases/latest")
+      .then((res) => {
+        if (!res.ok) throw new Error("Failed to fetch release");
+        return res.json();
+      })
+      .then((data) => {
+        const latestTag = data.tag_name;
+        if (latestTag) {
+          const cleanLatest = latestTag.replace(/^v/, "");
+          const cleanCurrent = CURRENT_VERSION.replace(/^v/, "");
+          if (cleanLatest !== cleanCurrent) {
+            const zipAsset = data.assets?.find((asset: any) =>
+              asset.name.endsWith(".zip")
+            );
+            if (zipAsset) {
+              setUpdateInfo({
+                version: latestTag,
+                downloadUrl: zipAsset.browser_download_url,
+                notes: data.body || "",
+              });
+            }
+          }
+        }
+      })
+      .catch((err) => console.error("Update check failed:", err));
+
     return () => {
       bridge.off("apps_loaded", handleAppsLoaded);
       bridge.off("files_results", handleFilesResults);
@@ -187,8 +221,7 @@ export default function App() {
       !trimmed.startsWith(">") &&
       !trimmed.startsWith(":") &&
       !trimmed.startsWith("#") &&
-      !trimmed.startsWith("$") &&
-      !trimmed.startsWith("%%") &&
+      !trimmed.startsWith("%") &&
       !trimmed.startsWith("=") &&
       !trimmed.startsWith("*") &&
       !trimmed.startsWith("?")
@@ -255,14 +288,25 @@ export default function App() {
   const results = useMemo(() => {
     const query = searchQuery.trim();
     const list: SearchItem[] = [];
+    const queryLower = query.toLowerCase();
+
+    // Prepend update card if an update is available and query is empty or relates to updating
+    if (updateInfo && (!query || "update".includes(queryLower) || "version".includes(queryLower))) {
+      list.push({
+        type: "system",
+        name: `✨ Update Available: ${updateInfo.version}`,
+        path: "update-spotlight",
+        command: `update-spotlight:${updateInfo.downloadUrl}`,
+        description: `Install version ${updateInfo.version}. Press Enter to update now.`,
+        iconName: "settings"
+      });
+    }
 
     if (!query) {
       list.push(...apps.slice(0, 5));
       list.push(...DEFAULT_SYSTEM_ACTIONS.slice(0, 4));
       return list;
     }
-
-    const queryLower = query.toLowerCase();
 
     // 0. AI Mode ("?")
     if (query.startsWith("?")) {
@@ -362,8 +406,8 @@ export default function App() {
       );
     }
 
-    // 7. Settings mode ("$")
-    if (query.startsWith("$")) {
+    // 7. Settings mode ("%")
+    if (query.startsWith("%") && !query.startsWith("%%")) {
       const settingsQuery = query.slice(1).trim().toLowerCase();
       return WINDOWS_SETTINGS.filter((set) =>
         set.name.toLowerCase().includes(settingsQuery) || set.description.toLowerCase().includes(settingsQuery)
@@ -453,11 +497,16 @@ export default function App() {
     // Files
     list.push(...fileResults);
 
-    // System commands
+    // System commands & Windows Settings
     const filteredSys = DEFAULT_SYSTEM_ACTIONS.filter((sys) =>
       sys.name.toLowerCase().includes(queryLower) || sys.description.toLowerCase().includes(queryLower)
     );
     list.push(...filteredSys);
+
+    const filteredSettings = WINDOWS_SETTINGS.filter((set) =>
+      set.name.toLowerCase().includes(queryLower) || set.description.toLowerCase().includes(queryLower)
+    );
+    list.push(...filteredSettings);
 
     // Web Search Options
     list.push(
@@ -478,7 +527,7 @@ export default function App() {
     );
 
     return list;
-  }, [searchQuery, apps, fileResults, services, hashes, clipboardHistory, historyList, aiAnswer, aiLoading, aiError]);
+  }, [searchQuery, apps, fileResults, services, hashes, clipboardHistory, historyList, aiAnswer, aiLoading, aiError, updateInfo]);
 
   // Save selection history to localStorage
   const saveToHistory = (item: SearchItem) => {
@@ -517,7 +566,10 @@ export default function App() {
         bridge.send("launch", { path: item.path });
       }
     } else if (item.type === "system") {
-      if (item.command.startsWith("ms-settings:")) {
+      if (item.command.startsWith("update-spotlight:")) {
+        const downloadUrl = item.command.replace("update-spotlight:", "");
+        bridge.send("trigger_update", { downloadUrl });
+      } else if (item.command.startsWith("ms-settings:")) {
         bridge.send("launch", { path: item.command });
       } else {
         bridge.send("system", { command: item.command });
