@@ -103,12 +103,22 @@ public class SystemActions
     {
         try
         {
-            var psi = new ProcessStartInfo(path)
+            if (path.StartsWith("shell:AppsFolder\\", StringComparison.OrdinalIgnoreCase))
+            {
+                var psi = new ProcessStartInfo("explorer.exe", path)
+                {
+                    UseShellExecute = true
+                };
+                Process.Start(psi);
+                return;
+            }
+
+            var psi2 = new ProcessStartInfo(path)
             {
                 Arguments = arguments ?? string.Empty,
                 UseShellExecute = true
             };
-            Process.Start(psi);
+            Process.Start(psi2);
         }
         catch (Exception ex)
         {
