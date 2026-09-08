@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
@@ -18,11 +19,36 @@ class Program
 
     static async Task<int> Main(string[] args)
     {
-        // Add User-Agent header required by GitHub API
         HttpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Spotlight-Setup-Utility");
 
         string installDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Spotlight");
         string targetExe = Path.Combine(installDir, "Spotlight.App.exe");
+
+        // If running from inside installDir (e.g. triggered via in-app update),
+        // spawn a temporary copy outside installDir so that all binaries (including Spotlight.Setup.exe) can be overwritten.
+        string currentExe = Process.GetCurrentProcess().MainModule?.FileName ?? string.Empty;
+        bool isTempRunner = args.Any(a => a.Equals("--temp-runner", StringComparison.OrdinalIgnoreCase));
+
+        if (!isTempRunner && !string.IsNullOrEmpty(currentExe) && currentExe.StartsWith(installDir, StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                string tempRunner = Path.Combine(Path.GetTempPath(), "SpotlightSetupRunner.exe");
+                File.Copy(currentExe, tempRunner, overwrite: true);
+
+                var forwardArgs = string.Join(" ", args.Select(a => $"\"{a}\"")) + " --temp-runner";
+                var psi = new ProcessStartInfo(tempRunner, forwardArgs)
+                {
+                    UseShellExecute = false
+                };
+                Process.Start(psi);
+                return 0; // Exit parent immediately to release file lock
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Warning] Failed to spawn temp runner: {ex.Message}");
+            }
+        }
 
         Console.WriteLine("==================================================");
         Console.WriteLine("          Spotlight Setup & Auto-Updater          ");
@@ -32,16 +58,20 @@ class Program
         {
             // 1. Check arguments for local update path
             string? localZipPath = null;
-            if (args.Length >= 2 && args[0].Equals("update", StringComparison.OrdinalIgnoreCase))
+            for (int i = 0; i < args.Length; i++)
             {
-                localZipPath = args[1];
-                Console.WriteLine($"[Info] Local update path provided: {localZipPath}");
+                if (args[i].Equals("update", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                {
+                    localZipPath = args[i + 1];
+                    Console.WriteLine($"[Info] Local update payload provided: {localZipPath}");
+                    break;
+                }
             }
 
             // 2. Stop any active running instances of Spotlight
             Console.WriteLine("[*] Stopping any running Spotlight instances...");
             KillRunningInstances();
-            Thread.Sleep(1000); // Give processes time to release file locks
+            Thread.Sleep(1200); // Give processes time to release file locks
 
             // 3. Ensure installation folder exists
             if (!Directory.Exists(installDir))
@@ -50,7 +80,7 @@ class Program
                 Console.WriteLine($"[Info] Created installation directory: {installDir}");
             }
 
-            // 4. Download latest package if local path not provided
+            // 4. Resolve package (local zip or GitHub latest release)
             string zipPath;
             if (!string.IsNullOrEmpty(localZipPath) && File.Exists(localZipPath))
             {
@@ -66,31 +96,31 @@ class Program
                     return 1;
                 }
 
-                Console.WriteLine($"[Info] Latest version: {releaseInfo.TagName}");
+                Console.WriteLine($"[Info] Target version: {releaseInfo.TagName}");
                 zipPath = Path.Combine(Path.GetTempPath(), $"Spotlight_{releaseInfo.TagName}.zip");
 
                 if (File.Exists(zipPath))
                 {
-                    File.Delete(zipPath);
+                    try { File.Delete(zipPath); } catch { }
                 }
 
-                Console.WriteLine($"[*] Downloading update from: {releaseInfo.DownloadUrl}...");
+                Console.WriteLine($"[*] Downloading update package from: {releaseInfo.DownloadUrl}...");
                 await DownloadFileAsync(releaseInfo.DownloadUrl, zipPath);
                 Console.WriteLine("[Success] Download complete.");
             }
 
-            // 5. Extract files
-            Console.WriteLine($"[*] Extracting update payload to: {installDir}...");
-            ZipFile.ExtractToDirectory(zipPath, installDir, overwriteFiles: true);
+            // 5. Extract files safely (preserving user data, handling transient file locks)
+            Console.WriteLine($"[*] Extracting payload to: {installDir}...");
+            ExtractPayload(zipPath, installDir);
             Console.WriteLine("[Success] Files extracted.");
 
-            // Cleanup temp downloaded file if it was online mode
+            // Cleanup temp downloaded file if online mode
             if (string.IsNullOrEmpty(localZipPath))
             {
-                try { File.Delete(zipPath); } catch { /* Ignore */ }
+                try { File.Delete(zipPath); } catch { }
             }
 
-            // 6. Setup Shortcuts and Registry Run Keys
+            // 6. Setup Shortcuts and Startup Registry Keys
             Console.WriteLine("[*] Configuring Start Menu shortcut...");
             string startMenuPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), @"Microsoft\Windows\Start Menu\Programs");
             string shortcutPath = Path.Combine(startMenuPath, "Spotlight.lnk");
@@ -99,7 +129,7 @@ class Program
             Console.WriteLine("[*] Registering run-at-startup Registry keys...");
             SetStartupRegistryKey(targetExe);
 
-            // 7. Restart application
+            // 7. Restart / Launch application
             if (File.Exists(targetExe))
             {
                 Console.WriteLine("[*] Launching Spotlight...");
@@ -130,20 +160,70 @@ class Program
         }
     }
 
+    private static void ExtractPayload(string zipPath, string installDir)
+    {
+        using var archive = ZipFile.OpenRead(zipPath);
+        foreach (var entry in archive.Entries)
+        {
+            if (string.IsNullOrEmpty(entry.Name) && (entry.FullName.EndsWith("/") || entry.FullName.EndsWith("\\")))
+            {
+                var dirPath = Path.Combine(installDir, entry.FullName);
+                Directory.CreateDirectory(dirPath);
+                continue;
+            }
+
+            var destinationPath = Path.Combine(installDir, entry.FullName);
+            var parentDir = Path.GetDirectoryName(destinationPath);
+            if (!string.IsNullOrEmpty(parentDir))
+            {
+                Directory.CreateDirectory(parentDir);
+            }
+
+            // Preserve user data
+            if (entry.Name.Equals("clipboard_history.json", StringComparison.OrdinalIgnoreCase) && File.Exists(destinationPath))
+            {
+                continue;
+            }
+
+            bool extracted = false;
+            for (int retry = 0; retry < 5; retry++)
+            {
+                try
+                {
+                    entry.ExtractToFile(destinationPath, overwrite: true);
+                    extracted = true;
+                    break;
+                }
+                catch (IOException)
+                {
+                    Thread.Sleep(300);
+                }
+            }
+
+            if (!extracted)
+            {
+                Console.WriteLine($"[Warning] Could not overwrite: {destinationPath}");
+            }
+        }
+    }
+
     private static void KillRunningInstances()
     {
-        var processes = Process.GetProcessesByName("Spotlight.App");
-        foreach (var p in processes)
+        var targetNames = new[] { "Spotlight.App", "Spotlight" };
+        foreach (var name in targetNames)
         {
-            try
+            foreach (var p in Process.GetProcessesByName(name))
             {
-                Console.WriteLine($"[Info] Terminating process PID {p.Id}...");
-                p.Kill();
-                p.WaitForExit(5000);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[Warning] Failed to stop PID {p.Id}: {ex.Message}");
+                try
+                {
+                    Console.WriteLine($"[Info] Terminating process PID {p.Id} ({p.ProcessName})...");
+                    p.Kill();
+                    p.WaitForExit(5000);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[Warning] Failed to stop PID {p.Id}: {ex.Message}");
+                }
             }
         }
     }
@@ -199,7 +279,6 @@ class Program
     {
         try
         {
-            // Execute hidden PowerShell instance to create COM-based shortcut
             string escapedShortcutPath = shortcutPath.Replace("'", "''");
             string escapedTargetExe = targetExe.Replace("'", "''");
             string escapedWorkingDir = workingDir.Replace("'", "''");

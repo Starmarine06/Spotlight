@@ -7,6 +7,7 @@ import type { SearchItem, AppSearchItem, FileSearchItem, SystemSearchItem, CalcS
 import { useKeyboard } from "./hooks/useKeyboard";
 import { bridge } from "./bridge";
 import { convertUnits, calculateSHA256, calculateSHA1 } from "./utils/prefixHelpers";
+import { scoreAndRankApps } from "./utils/fuzzySearch";
 
 const DEFAULT_SYSTEM_ACTIONS: SystemSearchItem[] = [
   { type: "system", name: "Lock Screen", path: "", command: "lock", description: "Lock the computer screen instantly", iconName: "lock" },
@@ -34,7 +35,7 @@ const WINDOWS_SETTINGS: SystemSearchItem[] = [
   { type: "system", name: "Date & Time Settings", path: "ms-settings:dateandtime", command: "ms-settings:dateandtime", description: "Adjust date, time zone, and language settings", iconName: "settings" }
 ];
 
-const CURRENT_VERSION = "1.0.0";
+const CURRENT_VERSION = "1.2.0";
 
 export default function App() {
   const [searchQuery, setSearchQuery] = useState("");
@@ -462,8 +463,8 @@ export default function App() {
 
     // 11. Apps filter (".")
     if (query.startsWith(".")) {
-      const appQuery = query.slice(1).trim().toLowerCase();
-      return apps.filter((app) => app.name.toLowerCase().includes(appQuery));
+      const appQuery = query.slice(1).trim();
+      return scoreAndRankApps(apps, appQuery);
     }
 
     // NORMAL MODE: Combined search
@@ -488,11 +489,9 @@ export default function App() {
       }
     }
 
-    // Apps filter
-    const filteredApps = apps.filter((app) =>
-      app.name.toLowerCase().includes(queryLower)
-    );
-    list.push(...filteredApps);
+    // Apps filter with fuzzy ranking
+    const rankedApps = scoreAndRankApps(apps, query);
+    list.push(...rankedApps);
 
     // Files
     list.push(...fileResults);
