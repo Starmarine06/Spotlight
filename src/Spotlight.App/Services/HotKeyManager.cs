@@ -98,6 +98,9 @@ public class HotKeyManager
             _registeredIds.Add(id);
             _idToKind[id] = kind;
             ActiveHotkeys.Add(text);
+            // Also watch it with the keyboard hook: the hook sees keys before other apps' registrations and
+            // input methods do, and swallows the press so the two paths never both fire.
+            _hookBindings.Add(new Binding(text, mods, vk, kind));
             return;
         }
 
