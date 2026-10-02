@@ -6,15 +6,23 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
-    <Version>1.2.0</Version>
-    <AssemblyVersion>1.2.0.0</AssemblyVersion>
-    <FileVersion>1.2.0.0</FileVersion>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Version>1.3.0</Version>
+    <AssemblyVersion>1.3.0.0</AssemblyVersion>
+    <FileVersion>1.3.0.0</FileVersion>
+    <ApplicationIcon>Assets\spotlight.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <NoWarn>$(NoWarn);WFO0003</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- WPF + WinForms both define Application, MessageBox, Clipboard... keep WPF's as the default. -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3967.48" />
-    <PackageReference Include="System.Data.OleDb" Version="10.0.8" />
-    <PackageReference Include="System.Drawing.Common" Version="10.0.8" />
     <PackageReference Include="System.ServiceProcess.ServiceController" Version="10.0.8" />
   </ItemGroup>
 
@@ -24,23 +32,23 @@
     <Exec Command="npm run build" WorkingDirectory="..\Spotlight.UI" />
   </Target>
 
-  <!-- Build Spotlight.Setup project and copy to output directory -->
-  <Target Name="BuildSetup" AfterTargets="Build">
+  <!-- Build Spotlight.Setup (the updater) and place it next to the app -->
+  <Target Name="BuildSetup" AfterTargets="Build" Condition="'$(SkipSetupBuild)' != 'true'">
     <Message Text="Building Spotlight.Setup updater..." Importance="high" />
     <Exec Command="dotnet publish ..\Spotlight.Setup\Spotlight.Setup.csproj -c $(Configuration) -r win-x64 --self-contained false -o &quot;$(OutputPath)&quot;" />
   </Target>
 
-  <!-- Copy frontend files dynamically after build to output and publish directories -->
+  <!-- Copy frontend files after build/publish so the app finds them in .\ui -->
   <Target Name="CopyFrontendToOutput" AfterTargets="BuildFrontend;Publish" Condition="'$(Configuration)' == 'Release'">
     <ItemGroup>
       <FrontendFiles Include="..\Spotlight.UI\dist\**\*.*" />
     </ItemGroup>
-    <Copy SourceFiles="@(FrontendFiles)" 
-          DestinationFiles="@(FrontendFiles->'$(OutputPath)ui\%(RecursiveDir)%(Filename)%(Extension)')" 
+    <Copy SourceFiles="@(FrontendFiles)"
+          DestinationFiles="@(FrontendFiles->'$(OutputPath)ui\%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" />
-    <Copy SourceFiles="@(FrontendFiles)" 
-          DestinationFiles="@(FrontendFiles->'$(PublishDir)ui\%(RecursiveDir)%(Filename)%(Extension)')" 
-          SkipUnchangedFiles="true" 
+    <Copy SourceFiles="@(FrontendFiles)"
+          DestinationFiles="@(FrontendFiles->'$(PublishDir)ui\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true"
           Condition="'$(PublishDir)' != ''" />
   </Target>
 </Project>

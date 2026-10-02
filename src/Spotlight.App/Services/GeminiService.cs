@@ -21,15 +21,7 @@ public static class GeminiService
         _httpClient.DefaultRequestHeaders.Add("Accept", "application/json");
     }
 
-    private static void Log(string msg)
-    {
-        try
-        {
-            var logPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ai_debug.log");
-            File.AppendAllText(logPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {msg}\r\n");
-        }
-        catch {}
-    }
+    private static void Log(string msg) => AppPaths.Log("[search] " + msg);
 
     public static async Task<(string? Answer, string? Error)> AskGemini(string query)
     {

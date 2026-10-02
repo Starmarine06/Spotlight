@@ -15,6 +15,12 @@ export default defineConfig([
       reactHooks.configs.flat.recommended,
       reactRefresh.configs.vite,
     ],
+    rules: {
+      // Messages from the native host are untyped JSON.
+      '@typescript-eslint/no-explicit-any': 'off',
+      // Resetting derived UI state when the query changes is intentional here.
+      'react-hooks/set-state-in-effect': 'off',
+    },
     languageOptions: {
       globals: globals.browser,
     },
