@@ -18,7 +18,7 @@ Spotlight is a keyboard-driven search and command launcher for Windows, inspired
 
 | Shortcut | Action |
 | --- | --- |
-| `Ctrl + Space` (also `Alt + Space`) | Show / hide Spotlight |
+| `Ctrl + Alt + Space` | Show / hide Spotlight |
 | `Ctrl + Alt + C` | Open directly in clipboard history |
 | `↑ ↓`, `PgUp PgDn`, `Ctrl+N / Ctrl+P` | Move selection |
 | `Enter` | Open / run / paste |
@@ -26,7 +26,7 @@ Spotlight is a keyboard-driven search and command launcher for Windows, inspired
 | `Ctrl + K` | Actions menu (run as administrator, copy path, ...) |
 | `Esc` | Clear the query, then close |
 
-> **Alt + Space and PowerToys.** PowerToys Run also claims `Alt + Space` and wins, because it uses a keyboard hook. Spotlight registers `Ctrl + Space` as well, so it works either way. If Windows refuses a combination for another reason (an input method owns it), Spotlight falls back to its own keyboard hook for that combination.
+> **Why not Alt+Space / Ctrl+Space?** PowerToys Run claims `Alt + Space`, and input methods often swallow `Ctrl + Space`. Spotlight listens with a keyboard hook so its shortcut wins; change it in `settings.json` (`SearchHotkeys`).
 
 ## Prefix modes
 
@@ -65,7 +65,7 @@ Your data lives in `%LOCALAPPDATA%\Spotlight\data` (settings, clipboard history,
 
 ```json
 {
-  "SearchHotkeys": ["Ctrl+Space", "Alt+Space"],
+  "SearchHotkeys": ["Ctrl+Alt+Space"],
   "ClipboardHotkeys": ["Ctrl+Alt+C"],
   "ExtraIndexRoots": ["D:\\Projects"],
   "ExcludedFolders": ["node_modules", ".git"],

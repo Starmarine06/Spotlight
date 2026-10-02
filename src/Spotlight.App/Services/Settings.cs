@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 
 namespace Spotlight.App.Services;
@@ -8,7 +9,7 @@ namespace Spotlight.App.Services;
 public class AppSettings
 {
     /// <summary>Hotkeys that toggle the launcher. All of them are registered (those that are free).</summary>
-    public List<string> SearchHotkeys { get; set; } = new() { "Ctrl+Space", "Alt+Space" };
+    public List<string> SearchHotkeys { get; set; } = new() { "Ctrl+Alt+Space" };
 
     /// <summary>Hotkeys that open the launcher straight in clipboard-history mode.</summary>
     public List<string> ClipboardHotkeys { get; set; } = new() { "Ctrl+Alt+C" };
@@ -46,7 +47,17 @@ public static class Settings
             if (File.Exists(_path))
             {
                 var loaded = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(_path));
-                if (loaded != null) return loaded;
+                if (loaded != null)
+                {
+                    // 1.3.0 shipped Ctrl+Space / Alt+Space as defaults; both are claimed by input methods and
+                    // PowerToys on many PCs. Move people who never customised them to the new default.
+                    if (loaded.SearchHotkeys.SequenceEqual(new[] { "Ctrl+Space", "Alt+Space" }))
+                    {
+                        loaded.SearchHotkeys = new AppSettings().SearchHotkeys;
+                        try { File.WriteAllText(_path, JsonSerializer.Serialize(loaded, _json)); } catch { }
+                    }
+                    return loaded;
+                }
             }
         }
         catch (Exception ex) { AppPaths.Log("Settings load failed: " + ex.Message); }
