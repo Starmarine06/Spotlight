@@ -14,10 +14,8 @@ public class ClipItem
 public static class ClipboardManager
 {
     private static readonly List<ClipItem> _history = new();
-    private static readonly string _historyPath = Path.Combine(
-        AppDomain.CurrentDomain.BaseDirectory, 
-        "clipboard_history.json"
-    );
+    private static readonly string _historyPath = Path.Combine(AppPaths.DataDir, "clipboard_history.json");
+    private static readonly string _legacyPath = Path.Combine(AppPaths.InstallDir, "clipboard_history.json");
 
     static ClipboardManager()
     {
@@ -83,6 +81,13 @@ public static class ClipboardManager
     {
         try
         {
+            // History used to live next to the executable; adopt it so updates never lose it.
+            if (!File.Exists(_historyPath) && File.Exists(_legacyPath))
+            {
+                Directory.CreateDirectory(AppPaths.DataDir);
+                File.Move(_legacyPath, _historyPath);
+            }
+
             if (File.Exists(_historyPath))
             {
                 var json = File.ReadAllText(_historyPath);

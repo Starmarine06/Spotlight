@@ -11,314 +11,408 @@ using Microsoft.Win32;
 
 namespace Spotlight.Setup;
 
+/// <summary>
+/// Installer and updater. An update is a real replace, not an overlay:
+///   1. wait for the running app to exit (kill it only if it will not),
+///   2. extract the new version to a staging folder and verify it,
+///   3. move the old version out of the way (into .backup), keeping only user data,
+///   4. move the new version in; if anything fails, restore the backup,
+///   5. relaunch.
+/// User data lives in the "data" sub-folder and is never touched.
+/// </summary>
 class Program
 {
-    private static readonly HttpClient HttpClient = new HttpClient();
     private const string RepoOwner = "Starmarine06";
     private const string RepoName = "Spotlight";
+    private const string AppExeName = "Spotlight.App.exe";
+
+    // Top-level entries inside the install folder that must survive an update.
+    private static readonly string[] Preserved =
+    {
+        "data", ".staging", ".backup", "clipboard_history.json", "gemini_key.txt"
+    };
+
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(10) };
+    private static readonly string InstallDir = Environment.GetEnvironmentVariable("SPOTLIGHT_HOME")
+        ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Spotlight");
+    private static readonly string StagingDir = Path.Combine(InstallDir, ".staging");
+    private static readonly string BackupDir = Path.Combine(InstallDir, ".backup");
+    private static readonly string LogPath = Path.Combine(InstallDir, "data", "setup.log");
 
     static async Task<int> Main(string[] args)
     {
-        HttpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Spotlight-Setup-Utility");
+        Http.DefaultRequestHeaders.UserAgent.ParseAdd("Spotlight-Setup");
 
-        string installDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Spotlight");
-        string targetExe = Path.Combine(installDir, "Spotlight.App.exe");
+        bool silent = HasFlag(args, "--silent");
+        bool isTempRunner = HasFlag(args, "--temp-runner");
+        int waitPid = ArgValue(args, "--wait-pid") is { } p && int.TryParse(p, out var pid) ? pid : 0;
+        string? zipArg = args.Length >= 2 && args[0].Equals("update", StringComparison.OrdinalIgnoreCase) ? args[1] : null;
 
-        // If running from inside installDir (e.g. triggered via in-app update),
-        // spawn a temporary copy outside installDir so that all binaries (including Spotlight.Setup.exe) can be overwritten.
-        string currentExe = Process.GetCurrentProcess().MainModule?.FileName ?? string.Empty;
-        bool isTempRunner = args.Any(a => a.Equals("--temp-runner", StringComparison.OrdinalIgnoreCase));
-
-        if (!isTempRunner && !string.IsNullOrEmpty(currentExe) && currentExe.StartsWith(installDir, StringComparison.OrdinalIgnoreCase))
+        // Running from inside the install folder would lock our own exe while replacing it: hop to a temp copy.
+        string currentExe = Environment.ProcessPath ?? string.Empty;
+        if (!isTempRunner && currentExe.StartsWith(InstallDir, StringComparison.OrdinalIgnoreCase))
         {
             try
             {
-                string tempRunner = Path.Combine(Path.GetTempPath(), "SpotlightSetupRunner.exe");
-                File.Copy(currentExe, tempRunner, overwrite: true);
-
-                var forwardArgs = string.Join(" ", args.Select(a => $"\"{a}\"")) + " --temp-runner";
-                var psi = new ProcessStartInfo(tempRunner, forwardArgs)
+                var runnerDir = Path.Combine(Path.GetTempPath(), "SpotlightSetup-" + Guid.NewGuid().ToString("N")[..8]);
+                Directory.CreateDirectory(runnerDir);
+                var runner = Path.Combine(runnerDir, "SpotlightSetupRunner.exe");
+                File.Copy(currentExe, runner, true);
+                var psi = new ProcessStartInfo(runner)
                 {
-                    UseShellExecute = false
+                    UseShellExecute = false,
+                    CreateNoWindow = silent
                 };
+                foreach (var a in args) psi.ArgumentList.Add(a);
+                psi.ArgumentList.Add("--temp-runner");
                 Process.Start(psi);
-                return 0; // Exit parent immediately to release file lock
+                return 0;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[Warning] Failed to spawn temp runner: {ex.Message}");
+                Log($"Could not spawn temp runner, continuing in place: {ex.Message}");
             }
         }
 
-        Console.WriteLine("==================================================");
-        Console.WriteLine("          Spotlight Setup & Auto-Updater          ");
-        Console.WriteLine("==================================================");
+        Log("==================================================");
+        Log("  Spotlight Setup");
+        Log("==================================================");
 
         try
         {
-            // 1. Check arguments for local update path
-            string? localZipPath = null;
-            for (int i = 0; i < args.Length; i++)
+            var zipPath = await ResolvePackageAsync(zipArg);
+            if (zipPath == null) return Fail("Could not find or download a Spotlight package.", silent);
+
+            ValidatePackage(zipPath);
+
+            Directory.CreateDirectory(InstallDir);
+            bool firstInstall = !File.Exists(Path.Combine(InstallDir, AppExeName));
+
+            StopRunningApp(waitPid);
+
+            Stage(zipPath);
+            ReplaceInstall();
+
+            // Packages we downloaded into %TEMP% are single-use; never delete a zip the user handed us.
+            if (zipPath.StartsWith(Path.GetTempPath(), StringComparison.OrdinalIgnoreCase)) TryDelete(zipPath);
+
+            var targetExe = Path.Combine(InstallDir, AppExeName);
+            // A relocated install (SPOTLIGHT_HOME, used for testing) must not rewire the user's real shortcuts.
+            if (Environment.GetEnvironmentVariable("SPOTLIGHT_HOME") == null)
             {
-                if (args[i].Equals("update", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
-                {
-                    localZipPath = args[i + 1];
-                    Console.WriteLine($"[Info] Local update payload provided: {localZipPath}");
-                    break;
-                }
+                CreateShortcut(targetExe);
+                RegisterStartup(targetExe, firstInstall);
             }
 
-            // 2. Stop any active running instances of Spotlight
-            Console.WriteLine("[*] Stopping any running Spotlight instances...");
-            KillRunningInstances();
-            Thread.Sleep(1200); // Give processes time to release file locks
+            Log("Launching Spotlight...");
+            Process.Start(new ProcessStartInfo(targetExe) { WorkingDirectory = InstallDir, UseShellExecute = true });
 
-            // 3. Ensure installation folder exists
-            if (!Directory.Exists(installDir))
-            {
-                Directory.CreateDirectory(installDir);
-                Console.WriteLine($"[Info] Created installation directory: {installDir}");
-            }
-
-            // 4. Resolve package (local zip or GitHub latest release)
-            string zipPath;
-            if (!string.IsNullOrEmpty(localZipPath) && File.Exists(localZipPath))
-            {
-                zipPath = localZipPath;
-            }
-            else
-            {
-                Console.WriteLine("[*] Fetching latest release info from GitHub...");
-                var releaseInfo = await GetLatestReleaseInfoAsync();
-                if (releaseInfo == null || string.IsNullOrEmpty(releaseInfo.DownloadUrl))
-                {
-                    Console.WriteLine("[Error] Could not retrieve download URL for the latest version.");
-                    return 1;
-                }
-
-                Console.WriteLine($"[Info] Target version: {releaseInfo.TagName}");
-                zipPath = Path.Combine(Path.GetTempPath(), $"Spotlight_{releaseInfo.TagName}.zip");
-
-                if (File.Exists(zipPath))
-                {
-                    try { File.Delete(zipPath); } catch { }
-                }
-
-                Console.WriteLine($"[*] Downloading update package from: {releaseInfo.DownloadUrl}...");
-                await DownloadFileAsync(releaseInfo.DownloadUrl, zipPath);
-                Console.WriteLine("[Success] Download complete.");
-            }
-
-            // 5. Extract files safely (preserving user data, handling transient file locks)
-            Console.WriteLine($"[*] Extracting payload to: {installDir}...");
-            ExtractPayload(zipPath, installDir);
-            Console.WriteLine("[Success] Files extracted.");
-
-            // Cleanup temp downloaded file if online mode
-            if (string.IsNullOrEmpty(localZipPath))
-            {
-                try { File.Delete(zipPath); } catch { }
-            }
-
-            // 6. Setup Shortcuts and Startup Registry Keys
-            Console.WriteLine("[*] Configuring Start Menu shortcut...");
-            string startMenuPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), @"Microsoft\Windows\Start Menu\Programs");
-            string shortcutPath = Path.Combine(startMenuPath, "Spotlight.lnk");
-            CreateShortcut(targetExe, installDir, shortcutPath);
-
-            Console.WriteLine("[*] Registering run-at-startup Registry keys...");
-            SetStartupRegistryKey(targetExe);
-
-            // 7. Restart / Launch application
-            if (File.Exists(targetExe))
-            {
-                Console.WriteLine("[*] Launching Spotlight...");
-                Process.Start(new ProcessStartInfo(targetExe)
-                {
-                    WorkingDirectory = installDir,
-                    UseShellExecute = true
-                });
-                Console.WriteLine("[Success] Spotlight successfully launched.");
-            }
-            else
-            {
-                Console.WriteLine($"[Error] Could not find executable to launch at: {targetExe}");
-                return 1;
-            }
-
-            Console.WriteLine("==================================================");
-            Console.WriteLine("      Spotlight has been successfully updated!    ");
-            Console.WriteLine("==================================================");
+            Log("Spotlight was installed successfully.");
             return 0;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[Error] Setup/Update failed: {ex.Message}");
-            Console.WriteLine(ex.StackTrace);
-            Console.ReadLine();
-            return 1;
+            return Fail($"Setup failed: {ex.Message}", silent, ex);
         }
     }
 
-    private static void ExtractPayload(string zipPath, string installDir)
+    // ------------------------------------------------------------------ package
+
+    private static async Task<string?> ResolvePackageAsync(string? zipArg)
     {
-        using var archive = ZipFile.OpenRead(zipPath);
-        foreach (var entry in archive.Entries)
+        if (!string.IsNullOrEmpty(zipArg) && File.Exists(zipArg))
         {
-            if (string.IsNullOrEmpty(entry.Name) && (entry.FullName.EndsWith("/") || entry.FullName.EndsWith("\\")))
-            {
-                var dirPath = Path.Combine(installDir, entry.FullName);
-                Directory.CreateDirectory(dirPath);
-                continue;
-            }
-
-            var destinationPath = Path.Combine(installDir, entry.FullName);
-            var parentDir = Path.GetDirectoryName(destinationPath);
-            if (!string.IsNullOrEmpty(parentDir))
-            {
-                Directory.CreateDirectory(parentDir);
-            }
-
-            // Preserve user data
-            if (entry.Name.Equals("clipboard_history.json", StringComparison.OrdinalIgnoreCase) && File.Exists(destinationPath))
-            {
-                continue;
-            }
-
-            bool extracted = false;
-            for (int retry = 0; retry < 5; retry++)
-            {
-                try
-                {
-                    entry.ExtractToFile(destinationPath, overwrite: true);
-                    extracted = true;
-                    break;
-                }
-                catch (IOException)
-                {
-                    Thread.Sleep(300);
-                }
-            }
-
-            if (!extracted)
-            {
-                Console.WriteLine($"[Warning] Could not overwrite: {destinationPath}");
-            }
+            Log($"Using provided package: {zipArg}");
+            return zipArg;
         }
-    }
 
-    private static void KillRunningInstances()
-    {
-        var targetNames = new[] { "Spotlight.App", "Spotlight" };
-        foreach (var name in targetNames)
+        // Offline install: a Spotlight_*.zip sitting next to the setup exe.
+        var sibling = Directory.EnumerateFiles(Path.GetDirectoryName(Environment.ProcessPath) ?? AppContext.BaseDirectory, "Spotlight_*.zip")
+            .OrderByDescending(f => f, StringComparer.OrdinalIgnoreCase).FirstOrDefault();
+        if (sibling != null)
         {
-            foreach (var p in Process.GetProcessesByName(name))
-            {
-                try
-                {
-                    Console.WriteLine($"[Info] Terminating process PID {p.Id} ({p.ProcessName})...");
-                    p.Kill();
-                    p.WaitForExit(5000);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[Warning] Failed to stop PID {p.Id}: {ex.Message}");
-                }
-            }
+            Log($"Using local package: {sibling}");
+            return sibling;
         }
+
+        Log("Looking up the latest release on GitHub...");
+        var (tag, url) = await GetLatestReleaseAsync();
+        if (url == null) return null;
+
+        Log($"Downloading {tag}...");
+        var dest = Path.Combine(Path.GetTempPath(), $"Spotlight_{tag}.zip");
+        TryDelete(dest);
+        await DownloadAsync(url, dest);
+        return dest;
     }
 
-    private static async Task<GitHubRelease?> GetLatestReleaseInfoAsync()
+    private static async Task<(string Tag, string? Url)> GetLatestReleaseAsync()
     {
-        string url = $"https://api.github.com/repos/{RepoOwner}/{RepoName}/releases/latest";
         try
         {
-            string response = await HttpClient.GetStringAsync(url);
-            using var doc = JsonDocument.Parse(response);
+            var json = await Http.GetStringAsync($"https://api.github.com/repos/{RepoOwner}/{RepoName}/releases/latest");
+            using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
-
-            string tagName = root.GetProperty("tag_name").GetString() ?? string.Empty;
-            string downloadUrl = string.Empty;
-
-            if (root.TryGetProperty("assets", out var assetsProp))
+            var tag = root.GetProperty("tag_name").GetString() ?? string.Empty;
+            foreach (var asset in root.GetProperty("assets").EnumerateArray())
             {
-                foreach (var asset in assetsProp.EnumerateArray())
-                {
-                    string name = asset.GetProperty("name").GetString() ?? string.Empty;
-                    if (name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
-                    {
-                        downloadUrl = asset.GetProperty("browser_download_url").GetString() ?? string.Empty;
-                        break;
-                    }
-                }
+                var name = asset.GetProperty("name").GetString() ?? string.Empty;
+                if (name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+                    return (tag, asset.GetProperty("browser_download_url").GetString());
             }
-
-            return new GitHubRelease
-            {
-                TagName = tagName,
-                DownloadUrl = downloadUrl
-            };
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[Warning] Failed to fetch release details: {ex.Message}");
-            return null;
+            Log($"Could not query GitHub: {ex.Message}");
+        }
+        return (string.Empty, null);
+    }
+
+    private static async Task DownloadAsync(string url, string destination)
+    {
+        using var response = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+        response.EnsureSuccessStatusCode();
+        long total = response.Content.Headers.ContentLength ?? -1;
+
+        await using var input = await response.Content.ReadAsStreamAsync();
+        await using var output = new FileStream(destination, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true);
+        var buffer = new byte[81920];
+        long done = 0;
+        int lastPercent = -1;
+        int read;
+        while ((read = await input.ReadAsync(buffer)) > 0)
+        {
+            await output.WriteAsync(buffer.AsMemory(0, read));
+            done += read;
+            if (total > 0)
+            {
+                int percent = (int)(done * 100 / total);
+                if (percent / 10 != lastPercent / 10) { Log($"  {percent}%"); lastPercent = percent; }
+            }
         }
     }
 
-    private static async Task DownloadFileAsync(string url, string destinationPath)
+    private static void ValidatePackage(string zipPath)
     {
-        using var response = await HttpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
-        response.EnsureSuccessStatusCode();
-
-        using var fileStream = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None, 8192, true);
-        await response.Content.CopyToAsync(fileStream);
+        using var zip = ZipFile.OpenRead(zipPath);
+        if (!zip.Entries.Any(e => e.FullName.Equals(AppExeName, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidDataException($"The package does not contain {AppExeName}.");
+        Log("Package verified.");
     }
 
-    private static void CreateShortcut(string targetExe, string workingDir, string shortcutPath)
+    // ------------------------------------------------------------------ replace
+
+    private static void StopRunningApp(int waitPid)
+    {
+        if (waitPid > 0)
+        {
+            try
+            {
+                Log($"Waiting for Spotlight (PID {waitPid}) to exit...");
+                using var proc = Process.GetProcessById(waitPid);
+                if (!proc.WaitForExit(15000))
+                {
+                    Log("It did not exit in time; terminating it.");
+                    proc.Kill(true);
+                    proc.WaitForExit(5000);
+                }
+            }
+            catch (ArgumentException) { /* already gone */ }
+            catch (Exception ex) { Log($"Wait failed: {ex.Message}"); }
+        }
+
+        // Anything else still running from THIS install folder (e.g. a second instance) would block deletion.
+        // Instances that live elsewhere (a dev build, another install) are none of our business.
+        foreach (var p in Process.GetProcessesByName("Spotlight.App"))
+        {
+            try
+            {
+                var path = p.MainModule?.FileName ?? string.Empty;
+                if (!path.StartsWith(InstallDir, StringComparison.OrdinalIgnoreCase)) continue;
+
+                Log($"Stopping Spotlight process {p.Id}...");
+                p.Kill(true);
+                p.WaitForExit(5000);
+            }
+            catch (Exception ex) { Log($"Could not stop {p.Id}: {ex.Message}"); }
+            finally { p.Dispose(); }
+        }
+        Thread.Sleep(400);
+    }
+
+    private static void Stage(string zipPath)
+    {
+        Log("Extracting new version...");
+        DeleteDirectory(StagingDir);
+        Directory.CreateDirectory(StagingDir);
+        ZipFile.ExtractToDirectory(zipPath, StagingDir, true);
+
+        if (!File.Exists(Path.Combine(StagingDir, AppExeName)))
+            throw new InvalidDataException("Extraction produced an incomplete package.");
+    }
+
+    private static void ReplaceInstall()
+    {
+        Log("Removing the old version...");
+        DeleteDirectory(BackupDir);
+        Directory.CreateDirectory(BackupDir);
+
+        try
+        {
+            foreach (var entry in Directory.EnumerateFileSystemEntries(InstallDir).ToList())
+            {
+                var name = Path.GetFileName(entry);
+                if (Preserved.Contains(name, StringComparer.OrdinalIgnoreCase)) continue;
+
+                // Leftovers from old releases (fd.exe, logs, WebView2 profile) are not worth restoring.
+                if (IsLegacyCruft(name))
+                {
+                    TryDelete(entry);
+                    continue;
+                }
+
+                MoveWithRetry(entry, Path.Combine(BackupDir, name));
+            }
+
+            Log("Installing the new version...");
+            foreach (var entry in Directory.EnumerateFileSystemEntries(StagingDir).ToList())
+                MoveWithRetry(entry, Path.Combine(InstallDir, Path.GetFileName(entry)));
+        }
+        catch
+        {
+            Log("Install failed - restoring the previous version.");
+            foreach (var entry in Directory.EnumerateFileSystemEntries(InstallDir).ToList())
+            {
+                if (!Preserved.Contains(Path.GetFileName(entry), StringComparer.OrdinalIgnoreCase)) TryDelete(entry);
+            }
+            foreach (var entry in Directory.EnumerateFileSystemEntries(BackupDir).ToList())
+                MoveWithRetry(entry, Path.Combine(InstallDir, Path.GetFileName(entry)));
+            throw;
+        }
+
+        DeleteDirectory(StagingDir);
+        DeleteDirectory(BackupDir);
+    }
+
+    private static bool IsLegacyCruft(string name) =>
+        name.Equals("fd.exe", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("ai_debug.log", StringComparison.OrdinalIgnoreCase) ||
+        name.EndsWith(".WebView2", StringComparison.OrdinalIgnoreCase);
+
+    private static void MoveWithRetry(string source, string destination)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                if (Directory.Exists(source)) Directory.Move(source, destination);
+                else File.Move(source, destination, true);
+                return;
+            }
+            catch (IOException) when (attempt < 10)
+            {
+                Thread.Sleep(300);
+            }
+            catch (UnauthorizedAccessException) when (attempt < 10)
+            {
+                Thread.Sleep(300);
+            }
+        }
+    }
+
+    private static void DeleteDirectory(string path)
+    {
+        if (!Directory.Exists(path)) return;
+        for (int attempt = 0; attempt < 5; attempt++)
+        {
+            try { Directory.Delete(path, true); return; }
+            catch { Thread.Sleep(250); }
+        }
+    }
+
+    private static void TryDelete(string path)
     {
         try
         {
-            string escapedShortcutPath = shortcutPath.Replace("'", "''");
-            string escapedTargetExe = targetExe.Replace("'", "''");
-            string escapedWorkingDir = workingDir.Replace("'", "''");
+            if (Directory.Exists(path)) DeleteDirectory(path);
+            else if (File.Exists(path)) File.Delete(path);
+        }
+        catch { }
+    }
 
-            string psCommand = $"$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut('{escapedShortcutPath}'); $Shortcut.TargetPath = '{escapedTargetExe}'; $Shortcut.WorkingDirectory = '{escapedWorkingDir}'; $Shortcut.Description = 'Fast keyboard-driven search and launcher for Windows'; $Shortcut.Save()";
-            
-            var psi = new ProcessStartInfo("powershell.exe")
-            {
-                Arguments = $"-NoProfile -WindowStyle Hidden -Command \"{psCommand}\"",
-                CreateNoWindow = true,
-                UseShellExecute = false
-            };
-            using var process = Process.Start(psi);
-            process?.WaitForExit();
+    // ------------------------------------------------------------------ shell integration
+
+    private static void CreateShortcut(string targetExe)
+    {
+        try
+        {
+            var startMenu = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), @"Microsoft\Windows\Start Menu\Programs");
+            var shortcutPath = Path.Combine(startMenu, "Spotlight.lnk");
+            var type = Type.GetTypeFromProgID("WScript.Shell");
+            if (type == null) return;
+
+            dynamic shell = Activator.CreateInstance(type)!;
+            dynamic shortcut = shell.CreateShortcut(shortcutPath);
+            shortcut.TargetPath = targetExe;
+            shortcut.WorkingDirectory = InstallDir;
+            shortcut.Description = "Fast keyboard-driven search and launcher for Windows";
+            shortcut.IconLocation = targetExe + ",0";
+            shortcut.Save();
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[Warning] Failed to create Start Menu shortcut: {ex.Message}");
+            Log($"Could not create Start Menu shortcut: {ex.Message}");
         }
     }
 
-    private static void SetStartupRegistryKey(string targetExe)
+    private static void RegisterStartup(string targetExe, bool firstInstall)
     {
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true);
-            if (key != null)
-            {
+            if (key == null) return;
+
+            // Updates must not silently re-enable a startup entry the user removed.
+            if (firstInstall || key.GetValue("Spotlight") != null)
                 key.SetValue("Spotlight", $"\"{targetExe}\"");
-            }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[Warning] Failed to set auto-run Registry key: {ex.Message}");
+            Log($"Could not register startup entry: {ex.Message}");
         }
     }
 
-    private class GitHubRelease
+    // ------------------------------------------------------------------ helpers
+
+    private static bool HasFlag(string[] args, string flag) => args.Any(a => a.Equals(flag, StringComparison.OrdinalIgnoreCase));
+
+    private static string? ArgValue(string[] args, string name)
     {
-        public string TagName { get; set; } = string.Empty;
-        public string DownloadUrl { get; set; } = string.Empty;
+        for (int i = 0; i < args.Length - 1; i++)
+            if (args[i].Equals(name, StringComparison.OrdinalIgnoreCase)) return args[i + 1];
+        return null;
+    }
+
+    private static int Fail(string message, bool silent, Exception? ex = null)
+    {
+        Log("[ERROR] " + message);
+        if (ex != null) Log(ex.ToString());
+        if (!silent)
+        {
+            Console.WriteLine("Press Enter to close...");
+            try { Console.ReadLine(); } catch { }
+        }
+        return 1;
+    }
+
+    private static void Log(string message)
+    {
+        Console.WriteLine(message);
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(LogPath)!);
+            File.AppendAllText(LogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}");
+        }
+        catch { }
     }
 }

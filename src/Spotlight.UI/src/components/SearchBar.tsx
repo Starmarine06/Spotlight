@@ -22,12 +22,20 @@ export const SearchBar: React.FC<SearchBarProps> = ({ value, onChange, onFocus }
       }
     };
 
+    // Typing anywhere (e.g. after clicking a result) should still land in the search box.
+    const handleTyping = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.altKey || e.metaKey || e.key.length !== 1) return;
+      if (document.activeElement !== inputRef.current) inputRef.current?.focus();
+    };
+
     window.addEventListener("focus", handleNativeFocus);
     window.addEventListener("window-shown", handleNativeFocus);
+    window.addEventListener("keydown", handleTyping, true);
 
     return () => {
       window.removeEventListener("focus", handleNativeFocus);
       window.removeEventListener("window-shown", handleNativeFocus);
+      window.removeEventListener("keydown", handleTyping, true);
     };
   }, []);
 

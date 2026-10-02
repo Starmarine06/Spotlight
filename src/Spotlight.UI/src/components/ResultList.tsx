@@ -1,21 +1,48 @@
 import React, { useEffect, useRef } from "react";
 import type { SearchItem } from "../types";
+import type { Range } from "../utils/fuzzySearch";
+import { sectionOf } from "../utils/results";
 
 interface ResultListProps {
   items: SearchItem[];
   activeIndex: number;
+  confirmKey: string | null;
+  query: string;
   onItemClick: (index: number) => void;
+  onItemHover: (index: number) => void;
 }
 
-export const ResultList: React.FC<ResultListProps> = ({ items, activeIndex, onItemClick }) => {
+/** Renders `text` with the matched character ranges emphasised. */
+const Highlight: React.FC<{ text: string; ranges?: Range[] }> = ({ text, ranges }) => {
+  if (!ranges || ranges.length === 0) return <>{text}</>;
+  const parts: React.ReactNode[] = [];
+  let cursor = 0;
+  ranges.forEach(([start, end], i) => {
+    if (start >= text.length) return;
+    if (start > cursor) parts.push(text.slice(cursor, start));
+    parts.push(<mark key={i} className="hl">{text.slice(start, Math.min(end, text.length))}</mark>);
+    cursor = Math.min(end, text.length);
+  });
+  if (cursor < text.length) parts.push(text.slice(cursor));
+  return <>{parts}</>;
+};
+
+export const ResultList: React.FC<ResultListProps> = ({ items, activeIndex, confirmKey, query, onItemClick, onItemHover }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  // Hovering moves the selection too; scrolling in response would make the list jump under the cursor.
+  const fromMouse = useRef(false);
 
   useEffect(() => {
-    const activeEl = containerRef.current?.querySelector(".result-item.active");
-    if (activeEl) {
-      activeEl.scrollIntoView({ block: "nearest" });
+    if (fromMouse.current) {
+      fromMouse.current = false;
+      return;
     }
+    containerRef.current?.querySelector(".result-item.active")?.scrollIntoView({ block: "nearest" });
   }, [activeIndex]);
+
+  useEffect(() => {
+    if (containerRef.current) containerRef.current.scrollTop = 0;
+  }, [query]);
 
   if (items.length === 0) {
     return (
@@ -24,26 +51,6 @@ export const ResultList: React.FC<ResultListProps> = ({ items, activeIndex, onIt
       </div>
     );
   }
-
-  const groups: { [key: string]: { label: string; items: { item: SearchItem; originalIndex: number }[] } } = {
-    ai: { label: "Google AI Assistant", items: [] },
-    calc: { label: "Calculator / Hashes", items: [] },
-    conversion: { label: "Unit Conversion", items: [] },
-    cmd: { label: "Command Prompt", items: [] },
-    registry: { label: "Registry Editor", items: [] },
-    service: { label: "Windows Services", items: [] },
-    system: { label: "System Actions", items: [] },
-    clip: { label: "Clipboard History", items: [] },
-    app: { label: "Applications", items: [] },
-    file: { label: "Files", items: [] },
-    web: { label: "Search Web", items: [] },
-  };
-
-  items.forEach((item, index) => {
-    if (groups[item.type]) {
-      groups[item.type].items.push({ item, originalIndex: index });
-    }
-  });
 
   const getSystemIcon = (iconName: string) => {
     switch (iconName) {
@@ -61,8 +68,8 @@ export const ResultList: React.FC<ResultListProps> = ({ items, activeIndex, onIt
         );
       case "power":
         return (
-          <svg className="item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11.52 15.085a1 1 0 01-1.04-.135L7.293 11.76H5.5a1 1 0 01-1-1v-1.52a1 1 0 011-1h1.793l3.187-3.19a1 1 0 011.04-.135A1 1 0 0112 6.36v7.36a1 1 0 01-.48.865zM17 9.36a4 4 0 010 5.28M20.5 7a8 8 0 010 10" />
+          <svg className="item-icon" style={{ color: "#f87171" }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5.636 5.636a9 9 0 1012.728 0M12 3v9" />
           </svg>
         );
       case "volume_up":
@@ -87,6 +94,12 @@ export const ResultList: React.FC<ResultListProps> = ({ items, activeIndex, onIt
         return (
           <svg className="item-icon" style={{ color: "#3b82f6" }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 7l10 10-5 5V2l5 5L7 17" />
+          </svg>
+        );
+      case "update":
+        return (
+          <svg className="item-icon" style={{ color: "#34d399" }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
           </svg>
         );
       case "settings":
@@ -173,121 +186,99 @@ export const ResultList: React.FC<ResultListProps> = ({ items, activeIndex, onIt
 
   return (
     <div ref={containerRef} className="results-panel">
-      {Object.keys(groups).map((key) => {
-        const group = groups[key];
-        if (group.items.length === 0) return null;
+      {items.map((item, index) => {
+        const section = sectionOf(item);
+        const previous = index > 0 ? sectionOf(items[index - 1]) : null;
+        const isActive = index === activeIndex;
+        const isConfirming = item.type === "system" && item.confirm && confirmKey === `sys:${item.command}`;
 
         return (
-          <React.Fragment key={key}>
-            <div className="group-header">{group.label}</div>
-            {group.items.map(({ item, originalIndex }) => {
-              const isActive = originalIndex === activeIndex;
-
-              return (
-                <div
-                  key={originalIndex}
-                  className={`result-item ${isActive ? "active" : ""}`}
-                  onClick={() => onItemClick(originalIndex)}
-                >
-                  <div className="item-icon-container">
-                    {item.type === "app" ? (
-                      item.icon ? (
-                        <img src={`data:image/png;base64,${item.icon}`} className="item-icon" alt={item.name} />
-                      ) : (
-                        <svg className="item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                        </svg>
-                      )
-                    ) : item.type === "file" ? (
-                      getFileIcon(item.extension)
-                    ) : item.type === "system" ? (
-                      getSystemIcon(item.iconName)
-                    ) : item.type === "calc" ? (
-                      <svg className="item-icon" style={{ color: "#a78bfa" }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
-                      </svg>
-                    ) : item.type === "cmd" ? (
-                      <svg className="item-icon" style={{ color: "#34d399" }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                      </svg>
-                    ) : item.type === "registry" ? (
-                      <svg className="item-icon" style={{ color: "#fb923c" }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                      </svg>
-                    ) : item.type === "service" ? (
-                      <svg className="item-icon" style={{ color: "#60a5fa" }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                      </svg>
-                    ) : item.type === "conversion" ? (
-                      <svg className="item-icon" style={{ color: "#38bdf8" }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
-                      </svg>
-                    ) : item.type === "clip" ? (
-                      <svg className="item-icon" style={{ color: "#f472b6" }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
-                      </svg>
-                    ) : item.type === "ai" ? (
-                      <svg className="item-icon" style={{ color: "#c084fc" }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-                      </svg>
-                    ) : (
-                      <svg className="item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
-                      </svg>
-                    )}
-                  </div>
-                  <div className="item-details">
-                    <div style={{ display: "flex", alignItems: "center" }}>
-                      <span className="item-title">{item.name}</span>
-                      {item.type === "service" && (
-                        <span 
-                          style={{
-                            fontSize: "10px",
-                            padding: "1px 6px",
-                            borderRadius: "4px",
-                            fontWeight: 600,
-                            marginLeft: "10px",
-                            background: item.status === "Running" ? "rgba(52, 211, 153, 0.15)" : "rgba(239, 68, 68, 0.15)",
-                            color: item.status === "Running" ? "#34d399" : "#ef4444",
-                            border: item.status === "Running" ? "1px solid rgba(52, 211, 153, 0.25)" : "1px solid rgba(239, 68, 68, 0.25)",
-                            textTransform: "uppercase"
-                          }}
-                        >
-                          {item.status}
-                        </span>
-                      )}
-                    </div>
-                    <span className="item-subtitle">
-                      {item.type === "app"
-                        ? (item.arguments ? `${item.path} ${item.arguments}` : item.path)
-                        : item.type === "file"
-                        ? item.path
-                        : item.type === "system"
-                        ? item.description
-                        : item.type === "calc"
-                        ? `Calculator expression: ${item.expression}`
-                        : item.type === "cmd"
-                        ? `Run shell command: ${item.command}`
-                        : item.type === "registry"
-                        ? `Navigate to registry path`
-                        : item.type === "service"
-                        ? `System Service name: ${item.serviceName}`
-                        : item.type === "conversion"
-                        ? `Copy converted value to clipboard`
-                        : item.type === "clip"
-                        ? `Copied at ${item.timestamp} • Press Enter to paste`
-                        : item.type === "ai"
-                        ? `Ask Google AI for real-time search and answers`
-                        : `Open query in ${item.engine === "google" ? "Google Search" : "DuckDuckGo"}`}
-                    </span>
-                  </div>
+          <React.Fragment key={`${section.key}-${item.type}-${item.path}-${item.name}-${index}`}>
+            {(!previous || previous.key !== section.key) && <div className="group-header">{section.label}</div>}
+            <div
+              className={`result-item ${isActive ? "active" : ""} ${isConfirming ? "confirming" : ""}`}
+              onClick={() => onItemClick(index)}
+              onMouseMove={() => {
+                if (index !== activeIndex) {
+                  fromMouse.current = true;
+                  onItemHover(index);
+                }
+              }}
+            >
+              <div className="item-icon-container">{renderIcon(item)}</div>
+              <div className="item-details">
+                <div style={{ display: "flex", alignItems: "center" }}>
+                  <span className="item-title">
+                    <Highlight text={item.name} ranges={item.ranges} />
+                  </span>
+                  {item.type === "service" && (
+                    <span className={`status-badge ${item.status === "Running" ? "running" : "stopped"}`}>{item.status}</span>
+                  )}
                 </div>
-              );
-            })}
+                <span className="item-subtitle">{isConfirming ? "Press Enter again to confirm" : subtitleFor(item)}</span>
+              </div>
+            </div>
           </React.Fragment>
         );
       })}
     </div>
   );
+
+  function renderIcon(item: SearchItem) {
+    if (item.type === "app") {
+      return item.icon ? (
+        <img src={item.icon} className="item-icon app-icon" alt="" loading="lazy" />
+      ) : (
+        <svg className="item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+        </svg>
+      );
+    }
+    if (item.type === "file") return item.isFolder ? folderIcon() : getFileIcon(item.extension);
+    if (item.type === "system") return item.iconName === "folder" ? folderIcon() : getSystemIcon(item.iconName);
+    return getTypeIcon(item.type);
+  }
 };
+
+function subtitleFor(item: SearchItem): string {
+  switch (item.type) {
+    case "app": return item.arguments ? `${item.path} ${item.arguments}` : item.path;
+    case "file": return item.path;
+    case "system": return item.description;
+    case "calc": return `Calculator: ${item.expression}`;
+    case "cmd": return `Run shell command: ${item.command}`;
+    case "registry": return "Navigate to registry path";
+    case "service": return `System service: ${item.serviceName}`;
+    case "conversion": return "Copy converted value to clipboard";
+    case "clip": return `Copied ${item.timestamp} - Enter to paste`;
+    case "ai": return "Look up a quick answer from the web";
+    case "web": return item.engine === "url" ? item.url ?? "" : `Open query in ${item.engine === "google" ? "Google Search" : "DuckDuckGo"}`;
+  }
+}
+
+const folderIcon = () => (
+  <svg className="item-icon" style={{ color: "#fbbf24" }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
+  </svg>
+);
+
+const colored = (color: string, path: string, extra?: string) => (
+  <svg className="item-icon" style={{ color }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={path} />
+    {extra && <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={extra} />}
+  </svg>
+);
+
+function getTypeIcon(type: SearchItem["type"]) {
+  switch (type) {
+    case "calc": return colored("#a78bfa", "M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z");
+    case "cmd": return colored("#34d399", "M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z");
+    case "registry": return colored("#fb923c", "M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10");
+    case "service": return colored("#60a5fa", "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z", "M15 12a3 3 0 11-6 0 3 3 0 016 0z");
+    case "conversion": return colored("#38bdf8", "M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4");
+    case "clip": return colored("#f472b6", "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01");
+    case "ai": return colored("#c084fc", "M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z");
+    default:
+      return colored("#94a3b8", "M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9");
+  }
+}

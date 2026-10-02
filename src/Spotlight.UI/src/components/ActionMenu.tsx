@@ -7,62 +7,73 @@ interface ActionMenuProps {
   onExecuteAction: (actionType: string) => void;
 }
 
+interface Action {
+  label: string;
+  type: string;
+  /** Ctrl+<key> triggers the action while the menu is open. */
+  key?: string;
+}
+
+function actionsFor(item: SearchItem): Action[] {
+  switch (item.type) {
+    case "app":
+      return [
+        { label: "Open Application", type: "open" },
+        { label: "Run as Administrator", type: "run_admin", key: "a" },
+        { label: "Show in File Explorer", type: "show_explorer", key: "o" },
+        { label: "Copy Path", type: "copy_path", key: "c" },
+      ];
+    case "file":
+      return [
+        { label: item.isFolder ? "Open Folder" : "Open File", type: "open" },
+        { label: "Show in File Explorer", type: "show_explorer", key: "o" },
+        { label: "Copy Full Path", type: "copy_path", key: "c" },
+        { label: "Copy Name", type: "copy_name", key: "n" },
+      ];
+    case "system":
+      return [{ label: "Run", type: "open" }];
+    case "calc":
+    case "conversion":
+      return [{ label: "Copy Result to Clipboard", type: "open" }];
+    case "web":
+      return [{ label: "Open in Browser", type: "open" }];
+    case "cmd":
+      return [
+        { label: "Run Command", type: "open" },
+        { label: "Copy Command Text", type: "copy_path", key: "c" },
+      ];
+    case "registry":
+      return [
+        { label: "Open Registry Key", type: "open" },
+        { label: "Copy Registry Path", type: "copy_path", key: "c" },
+      ];
+    case "service":
+      return [
+        { label: "Start Service", type: "start", key: "s" },
+        { label: "Stop Service", type: "stop", key: "d" },
+        { label: "Restart Service", type: "restart", key: "r" },
+      ];
+    case "ai":
+      return [{ label: "Copy Answer to Clipboard", type: "open" }];
+    case "clip":
+      return [
+        { label: "Paste Clip", type: "open" },
+        { label: "Copy to Clipboard", type: "copy_text", key: "c" },
+        { label: "Delete Clip", type: "delete", key: "d" },
+        { label: "Clear Clipboard History", type: "clear_history", key: "r" },
+      ];
+  }
+}
+
 export const ActionMenu: React.FC<ActionMenuProps> = ({ item, onClose, onExecuteAction }) => {
   const [activeIndex, setActiveIndex] = useState(0);
-
-  const actions: { label: string; shortcut: string; type: string }[] = [];
-
-  if (item.type === "app") {
-    actions.push(
-      { label: "Open Application", shortcut: "↵", type: "open" },
-      { label: "Copy Executable Path", shortcut: "Ctrl+C", type: "copy_path" }
-    );
-  } else if (item.type === "file") {
-    actions.push(
-      { label: "Open File", shortcut: "↵", type: "open" },
-      { label: "Show in File Explorer", shortcut: "Ctrl+O", type: "show_explorer" },
-      { label: "Copy File Path", shortcut: "Ctrl+C", type: "copy_path" }
-    );
-  } else if (item.type === "system") {
-    actions.push({ label: "Execute Command", shortcut: "↵", type: "open" });
-  } else if (item.type === "calc") {
-    actions.push({ label: "Copy Result to Clipboard", shortcut: "↵", type: "copy_result" });
-  } else if (item.type === "web") {
-    actions.push({ label: `Search in Browser`, shortcut: "↵", type: "open" });
-  } else if (item.type === "cmd") {
-    actions.push(
-      { label: "Run Command", shortcut: "↵", type: "open" },
-      { label: "Copy Command Text", shortcut: "Ctrl+C", type: "copy_path" }
-    );
-  } else if (item.type === "registry") {
-    actions.push(
-      { label: "Open Registry Key", shortcut: "↵", type: "open" },
-      { label: "Copy Registry Path", shortcut: "Ctrl+C", type: "copy_path" }
-    );
-  } else if (item.type === "service") {
-    actions.push(
-      { label: "Start Service", shortcut: "Ctrl+S", type: "start" },
-      { label: "Stop Service", shortcut: "Ctrl+D", type: "stop" },
-      { label: "Restart Service", shortcut: "Ctrl+R", type: "restart" }
-    );
-  } else if (item.type === "conversion") {
-    actions.push({ label: "Copy Result to Clipboard", shortcut: "↵", type: "copy_result" });
-  } else if (item.type === "ai") {
-    actions.push({ label: "Copy Answer to Clipboard", shortcut: "↵", type: "copy_result" });
-  } else if (item.type === "clip") {
-    actions.push(
-      { label: "Paste Clip", shortcut: "↵", type: "paste" },
-      { label: "Copy to Clipboard", shortcut: "Ctrl+C", type: "copy_text" },
-      { label: "Delete Clip", shortcut: "Ctrl+D", type: "delete" },
-      { label: "Clear Clipboard History", shortcut: "Ctrl+R", type: "clear_history" }
-    );
-  }
+  const actions = actionsFor(item);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       e.stopPropagation();
 
-      if (e.key === "Escape") {
+      if (e.key === "Escape" || ((e.key === "k" || e.key === "K") && e.ctrlKey)) {
         e.preventDefault();
         onClose();
       } else if (e.key === "ArrowDown") {
@@ -74,13 +85,17 @@ export const ActionMenu: React.FC<ActionMenuProps> = ({ item, onClose, onExecute
       } else if (e.key === "Enter") {
         e.preventDefault();
         onExecuteAction(actions[activeIndex].type);
+      } else if (e.ctrlKey) {
+        const match = actions.find((a) => a.key === e.key.toLowerCase());
+        if (match) {
+          e.preventDefault();
+          onExecuteAction(match.type);
+        }
       }
     };
 
     window.addEventListener("keydown", handleKeyDown, true);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown, true);
-    };
+    return () => window.removeEventListener("keydown", handleKeyDown, true);
   }, [activeIndex, actions, onClose, onExecuteAction]);
 
   return (
@@ -100,7 +115,7 @@ export const ActionMenu: React.FC<ActionMenuProps> = ({ item, onClose, onExecute
               </svg>
               <span>{act.label}</span>
             </div>
-            <kbd>{act.shortcut}</kbd>
+            <kbd>{act.key ? `Ctrl+${act.key.toUpperCase()}` : "↵"}</kbd>
           </div>
         ))}
       </div>

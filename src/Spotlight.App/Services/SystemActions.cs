@@ -56,6 +56,16 @@ public class SystemActions
         Process.Start(psi);
     }
 
+    public static void Hibernate()
+    {
+        Process.Start(new ProcessStartInfo("shutdown.exe", "/h") { CreateNoWindow = true, UseShellExecute = false });
+    }
+
+    public static void SignOut()
+    {
+        Process.Start(new ProcessStartInfo("shutdown.exe", "/l") { CreateNoWindow = true, UseShellExecute = false });
+    }
+
     public static void Shutdown()
     {
         var psi = new ProcessStartInfo("shutdown.exe", "/s /t 0")
@@ -99,10 +109,15 @@ public class SystemActions
         SHEmptyRecycleBin(IntPtr.Zero, null, SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND);
     }
 
-    public static void LaunchFile(string path, string? arguments = null)
+    public static void LaunchFile(string path, string? arguments = null, bool admin = false)
     {
         try
         {
+            // Allow "~\Documents" and "%USERPROFILE%\x" typed into the launcher.
+            if (path.StartsWith("~\\") || path.StartsWith("~/"))
+                path = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), path[2..]);
+            path = Environment.ExpandEnvironmentVariables(path);
+
             if (path.StartsWith("shell:AppsFolder\\", StringComparison.OrdinalIgnoreCase))
             {
                 var psi = new ProcessStartInfo("explorer.exe", path)
@@ -118,6 +133,11 @@ public class SystemActions
                 Arguments = arguments ?? string.Empty,
                 UseShellExecute = true
             };
+            if (admin) psi2.Verb = "runas";
+
+            // Many programs resolve resources relative to their own folder.
+            if (System.IO.File.Exists(path))
+                psi2.WorkingDirectory = System.IO.Path.GetDirectoryName(path) ?? string.Empty;
             Process.Start(psi2);
         }
         catch (Exception ex)
@@ -240,7 +260,7 @@ public class SystemActions
             window.Dispatcher.Invoke(() => window.HideWindow());
 
             // Wait brief moment (100ms) for target window to reclaim active focus
-            await System.Threading.Tasks.Task.Delay(100);
+            await System.Threading.Tasks.Task.Delay(180);
 
             // Simulate Ctrl + V keypresses
             keybd_event(VK_CONTROL, 0, 0, UIntPtr.Zero);

@@ -1,98 +1,96 @@
-export interface AppSearchItem {
-  type: "app";
+import type { Range } from "./utils/fuzzySearch";
+
+interface Base {
   name: string;
   path: string;
-  arguments?: string;
-  icon?: string; // base64
+  /** Character ranges of `name` that matched the query (for highlighting). */
+  ranges?: Range[];
 }
 
-export interface FileSearchItem {
+export interface AppSearchItem extends Base {
+  type: "app";
+  id?: string;
+  arguments?: string;
+  /** URL of the cached PNG icon (served by the host). */
+  icon?: string;
+  /** Executable base name, used by search ("word" -> winword). */
+  exe?: string;
+}
+
+export interface FileSearchItem extends Base {
   type: "file";
-  name: string;
-  path: string;
   size: number;
   dateModified: string;
   extension: string;
+  isFolder: boolean;
+  score: number;
 }
 
-export interface SystemSearchItem {
+export interface SystemSearchItem extends Base {
   type: "system";
-  name: string;
-  path: string;
   command: string;
   description: string;
   iconName: string;
+  keywords?: string[];
+  /** Needs a second Enter press before running (shutdown, restart, ...). */
+  confirm?: boolean;
 }
 
-export interface CalcSearchItem {
+export interface CalcSearchItem extends Base {
   type: "calc";
-  name: string;
-  path: string;
   expression: string;
   result: string;
 }
 
-export interface WebSearchItem {
+export interface WebSearchItem extends Base {
   type: "web";
-  name: string;
-  path: string;
   query: string;
-  engine: "google" | "duckduckgo";
+  engine: "google" | "duckduckgo" | "url";
+  url?: string;
 }
 
-export interface ServiceSearchItem {
+export interface ServiceSearchItem extends Base {
   type: "service";
-  name: string;
-  path: string;
   serviceName: string;
   displayName: string;
   status: string; // "Running", "Stopped", etc.
 }
 
-export interface RegistrySearchItem {
+export interface RegistrySearchItem extends Base {
   type: "registry";
-  name: string;
-  path: string;
   registryPath: string;
 }
 
-export interface CommandSearchItem {
+export interface CommandSearchItem extends Base {
   type: "cmd";
-  name: string;
-  path: string;
   command: string;
 }
 
-export interface ConversionSearchItem {
+export interface ConversionSearchItem extends Base {
   type: "conversion";
-  name: string;
-  path: string;
   result: string;
+  copy?: string;
 }
 
-export interface ClipSearchItem {
+export interface ClipSearchItem extends Base {
   type: "clip";
-  name: string;
-  path: string;
   fullText: string;
   timestamp: string;
 }
 
-export interface AISearchItem {
+export interface AISearchItem extends Base {
   type: "ai";
-  name: string;
-  path: string;
   query: string;
   answer?: string;
   error?: string;
   loading?: boolean;
 }
 
-export type SearchItem = 
-  | AppSearchItem 
-  | FileSearchItem 
-  | SystemSearchItem 
-  | CalcSearchItem 
+export type SearchItem =
+  | AppSearchItem
+  | FileSearchItem
+  | SystemSearchItem
+  | CalcSearchItem
   | WebSearchItem
   | ServiceSearchItem
   | RegistrySearchItem
@@ -100,3 +98,11 @@ export type SearchItem =
   | ConversionSearchItem
   | ClipSearchItem
   | AISearchItem;
+
+export interface UpdateState {
+  version: string;
+  notes: string;
+  /** 0-100 while downloading, undefined when idle. */
+  progress?: number;
+  error?: string;
+}
