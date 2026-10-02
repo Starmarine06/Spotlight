@@ -20,10 +20,7 @@ class WebViewBridge {
       window.chrome.webview.addEventListener("message", (event: any) => {
         try {
           const message = typeof event.data === "string" ? JSON.parse(event.data) : event.data;
-          const { type, payload } = message;
-          if (type && this.listeners[type]) {
-            this.listeners[type].forEach(cb => cb(payload));
-          }
+          this.trigger(message.type, message.payload);
         } catch (e) {
           console.error("Failed to parse webview message:", e);
         }
@@ -34,69 +31,65 @@ class WebViewBridge {
   public send(type: string, data: any = {}) {
     if (window.chrome?.webview) {
       window.chrome.webview.postMessage(JSON.stringify({ type, ...data }));
-    } else {
-      console.log(`[Bridge Mock Send] Type: ${type}`, data);
-      
-      // Provide developer mock responses when running in standard browser
-      if (type === "init") {
+      return;
+    }
+
+    // Plain-browser development: answer with mock data so the UI can be worked on without the host.
+    console.log(`[Bridge Mock Send] ${type}`, data);
+    switch (type) {
+      case "init":
         setTimeout(() => {
+          this.trigger("app_info", { version: "dev", indexReady: true, hotkeys: ["Ctrl+Space"] });
           this.trigger("apps_loaded", [
-            { Name: "Google Chrome", TargetPath: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", IconBase64: "" },
-            { Name: "Notepad", TargetPath: "C:\\Windows\\System32\\notepad.exe", IconBase64: "" },
-            { Name: "Visual Studio Code", TargetPath: "C:\\Program Files\\Microsoft VS Code\\Code.exe", IconBase64: "" },
-            { Name: "Calculator", TargetPath: "C:\\Windows\\System32\\calc.exe", IconBase64: "" },
-            { Name: "File Explorer", TargetPath: "C:\\Windows\\explorer.exe", IconBase64: "" }
+            { Id: "1", Name: "Google Chrome", TargetPath: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", Exe: "chrome" },
+            { Id: "2", Name: "Notepad", TargetPath: "C:\\Windows\\System32\\notepad.exe", Exe: "notepad" },
+            { Id: "3", Name: "Visual Studio Code", TargetPath: "C:\\Program Files\\Microsoft VS Code\\Code.exe", Exe: "Code" },
+            { Id: "4", Name: "Calculator", TargetPath: "C:\\Windows\\System32\\calc.exe", Exe: "calc" },
+            { Id: "5", Name: "Microsoft Word", TargetPath: "C:\\Program Files\\Microsoft Office\\WINWORD.EXE", Exe: "WINWORD" },
+            { Id: "6", Name: "Windows Terminal", TargetPath: "C:\\Program Files\\WindowsApps\\wt.exe", Exe: "wt" },
           ]);
-        }, 150);
-      } else if (type === "search_files") {
-        if (!data.query) return;
+        }, 100);
+        break;
+      case "search_files":
         setTimeout(() => {
           this.trigger("files_results", {
+            id: data.id,
             query: data.query,
+            ready: true,
             files: [
-              { Name: `Presentation_${data.query}.pptx`, Path: `C:\\Users\\User\\Documents\\Presentation_${data.query}.pptx`, Size: 1024 * 1024 * 4.2, DateModified: new Date().toISOString(), Extension: ".pptx" },
-              { Name: `Report_${data.query}.pdf`, Path: `C:\\Users\\User\\Reports\\Report_${data.query}.pdf`, Size: 1024 * 450, DateModified: new Date().toISOString(), Extension: ".pdf" },
-              { Name: `index_${data.query}.tsx`, Path: `C:\\Projects\\app\\src\\index_${data.query}.tsx`, Size: 1024 * 12, DateModified: new Date().toISOString(), Extension: ".tsx" }
-            ]
+              { Name: `Report_${data.query}.pdf`, Path: `C:\\Users\\User\\Documents\\Report_${data.query}.pdf`, Size: 450000, DateModified: new Date().toISOString(), Extension: ".pdf", IsFolder: false, Score: 4200 },
+              { Name: `${data.query}`, Path: `C:\\Users\\User\\Projects\\${data.query}`, Size: 0, DateModified: new Date().toISOString(), Extension: "", IsFolder: true, Score: 3900 },
+            ],
           });
-        }, 200);
-      } else if (type === "get_clipboard_history" || type === "delete_clipboard_item" || type === "clear_clipboard_history") {
+        }, 60);
+        break;
+      case "get_clipboard_history":
+      case "delete_clipboard_item":
+      case "clear_clipboard_history":
         setTimeout(() => {
           this.trigger("clipboard_history_loaded", [
-            { FullText: "Spotlight is a fast keyboard-driven search and command launcher.", Timestamp: "2026-06-02 12:00:00" },
             { FullText: "npm run dev", Timestamp: "2026-06-02 11:30:00" },
-            { FullText: "const value = Math.max(a, b);", Timestamp: "2026-06-02 10:45:00" },
-            { FullText: "https://github.com/google/deepmind", Timestamp: "2026-06-02 09:15:00" }
+            { FullText: "https://github.com/Starmarine06/Spotlight", Timestamp: "2026-06-02 09:15:00" },
           ]);
-        }, 150);
-      } else if (type === "ask_gemini") {
-        setTimeout(() => {
-          this.trigger("gemini_response", {
-            query: data.query,
-            answer: `Google AI Grounding Search Answer for: **"${data.query}"**\n\nGoogle AI is Google's division dedicated to artificial intelligence. By using Gemini 1.5 Flash with search tools, it retrieves real-time Google search summaries and grounds the responses.\n\n*   **Search grounding query:** ${data.query}\n*   **Status:** Running and grounded\n*   **Timestamp:** ${new Date().toLocaleTimeString()}\n\nTo view native results, configure your API key in gemini_key.txt or setting GEMINI_API_KEY environment variable.`,
-          });
-        }, 1200);
-      }
+        }, 80);
+        break;
+      case "ask_gemini":
+        setTimeout(() => this.trigger("gemini_response", { query: data.query, answer: `Mock answer for "${data.query}"`, error: null }), 600);
+        break;
     }
   }
 
   public on(type: string, callback: BridgeCallback) {
-    if (!this.listeners[type]) {
-      
-      this.listeners[type] = [];
-    }
-    this.listeners[type].push(callback);
+    (this.listeners[type] ??= []).push(callback);
   }
 
   public off(type: string, callback: BridgeCallback) {
     if (!this.listeners[type]) return;
-    this.listeners[type] = this.listeners[type].filter(cb => cb !== callback);
+    this.listeners[type] = this.listeners[type].filter((cb) => cb !== callback);
   }
 
   private trigger(type: string, payload: any) {
-    if (this.listeners[type]) {
-      this.listeners[type].forEach(cb => cb(payload));
-    }
+    this.listeners[type]?.forEach((cb) => cb(payload));
   }
 }
 

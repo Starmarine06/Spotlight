@@ -1,644 +1,415 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { SearchBar } from "./components/SearchBar";
 import { ResultList } from "./components/ResultList";
 import { PreviewPane } from "./components/PreviewPane";
 import { ActionMenu } from "./components/ActionMenu";
-import type { SearchItem, AppSearchItem, FileSearchItem, SystemSearchItem, CalcSearchItem, ServiceSearchItem, RegistrySearchItem, CommandSearchItem, ClipSearchItem } from "./types";
+import type { SearchItem, AppSearchItem, FileSearchItem, ServiceSearchItem, ClipSearchItem, UpdateState } from "./types";
 import { useKeyboard } from "./hooks/useKeyboard";
 import { bridge } from "./bridge";
-import { convertUnits, calculateSHA256, calculateSHA1 } from "./utils/prefixHelpers";
-import { scoreAndRankApps } from "./utils/fuzzySearch";
+import { calculateSHA256, calculateSHA1 } from "./utils/prefixHelpers";
+import { buildResults, usageKey } from "./utils/results";
+import { recordUsage } from "./utils/usage";
 
-const DEFAULT_SYSTEM_ACTIONS: SystemSearchItem[] = [
-  { type: "system", name: "Lock Screen", path: "", command: "lock", description: "Lock the computer screen instantly", iconName: "lock" },
-  { type: "system", name: "Sleep", path: "", command: "sleep", description: "Put the computer to sleep mode", iconName: "sleep" },
-  { type: "system", name: "Empty Recycle Bin", path: "", command: "empty_recycle_bin", description: "Empty Windows Recycle Bin", iconName: "trash" },
-  { type: "system", name: "Mute/Unmute Audio", path: "", command: "mute", description: "Toggle mute state of system audio", iconName: "power" },
-  { type: "system", name: "Volume Up", path: "", command: "volume_up", description: "Increase system volume", iconName: "volume_up" },
-  { type: "system", name: "Volume Down", path: "", command: "volume_down", description: "Decrease system volume", iconName: "volume_up" },
-  { type: "system", name: "Shutdown", path: "", command: "shutdown", description: "Safely turn off the computer", iconName: "power" },
-  { type: "system", name: "Restart", path: "", command: "restart", description: "Reboot the computer", iconName: "power" }
-];
+const ICON_BASE = "https://icons.spotlight.local/";
+const HISTORY_KEY = "spotlight_history";
 
-const WINDOWS_SETTINGS: SystemSearchItem[] = [
-  { type: "system", name: "Wi-Fi Settings", path: "ms-settings:network-wifi", command: "ms-settings:network-wifi", description: "Manage Wi-Fi networks and connection settings", iconName: "wifi" },
-  { type: "system", name: "Bluetooth Settings", path: "ms-settings:bluetooth", command: "ms-settings:bluetooth", description: "Manage Bluetooth devices, pairing, and discovery", iconName: "bluetooth" },
-  { type: "system", name: "Windows Update", path: "ms-settings:windowsupdate", command: "ms-settings:windowsupdate", description: "Check for updates, view update history", iconName: "settings" },
-  { type: "system", name: "Display Settings", path: "ms-settings:display", command: "ms-settings:display", description: "Brightness, resolution, multiple screens", iconName: "settings" },
-  { type: "system", name: "Network & Internet", path: "ms-settings:network", command: "ms-settings:network", description: "Wi-Fi, Ethernet, VPN, data usage", iconName: "settings" },
-  { type: "system", name: "Personalization", path: "ms-settings:personalization", command: "ms-settings:personalization", description: "Background, lock screen, themes, colors", iconName: "settings" },
-  { type: "system", name: "Apps & Features", path: "ms-settings:appsfeatures", command: "ms-settings:appsfeatures", description: "Uninstall apps, default apps, optional features", iconName: "settings" },
-  { type: "system", name: "Power & Sleep", path: "ms-settings:power", command: "ms-settings:power", description: "Screen timeout, sleep settings, battery", iconName: "settings" },
-  { type: "system", name: "Sound Settings", path: "ms-settings:sound", command: "ms-settings:sound", description: "Output devices, input devices, volume mixer", iconName: "settings" },
-  { type: "system", name: "Notification Settings", path: "ms-settings:notifications", command: "ms-settings:notifications", description: "Manage alerts, notifications, and sender options", iconName: "settings" },
-  { type: "system", name: "Storage Settings", path: "ms-settings:storagesense", command: "ms-settings:storagesense", description: "Check storage usage, clean temporary files", iconName: "settings" },
-  { type: "system", name: "Date & Time Settings", path: "ms-settings:dateandtime", command: "ms-settings:dateandtime", description: "Adjust date, time zone, and language settings", iconName: "settings" }
-];
-
-const CURRENT_VERSION = "1.2.0";
+/** Strip the mode prefix so the host only searches for what the user actually wants to find. */
+function fileQueryFor(query: string): { text: string; mode: "files" | "none" | "recent" } {
+  const q = query.trim();
+  if (q.startsWith("<")) {
+    const text = q.slice(1).trim();
+    return text ? { text, mode: "files" } : { text: "", mode: "recent" };
+  }
+  if (/^[.!>:#%$=*?]/.test(q)) return { text: "", mode: "none" };
+  return q.length >= 2 ? { text: q, mode: "files" } : { text: "", mode: "none" };
+}
 
 export default function App() {
   const [searchQuery, setSearchQuery] = useState("");
-  const [updateInfo, setUpdateInfo] = useState<{ version: string; downloadUrl: string; notes: string } | null>(null);
   const [apps, setApps] = useState<AppSearchItem[]>([]);
   const [fileResults, setFileResults] = useState<FileSearchItem[]>([]);
   const [services, setServices] = useState<ServiceSearchItem[]>([]);
-  const [hashes, setHashes] = useState<{ sha256: string; sha1: string }>({ sha256: "", sha1: "" });
+  const [hashes, setHashes] = useState({ sha256: "", sha1: "" });
   const [clipboardHistory, setClipboardHistory] = useState<ClipSearchItem[]>([]);
-  const [isActionsOpen, setIsActionsOpen] = useState(false);
   const [historyList, setHistoryList] = useState<SearchItem[]>([]);
-  
-  const [hasLoadedServices, setHasLoadedServices] = useState(false);
-  const [hasLoadedClipboard, setHasLoadedClipboard] = useState(false);
+  const [isActionsOpen, setIsActionsOpen] = useState(false);
+  const [version, setVersion] = useState("");
+  const [indexReady, setIndexReady] = useState(false);
+  const [update, setUpdate] = useState<UpdateState | null>(null);
+  const [confirmKey, setConfirmKey] = useState<string | null>(null);
 
-  // Google AI state
-  const [aiAnswer, setAiAnswer] = useState<string | undefined>(undefined);
+  const [aiAnswer, setAiAnswer] = useState<string | undefined>();
   const [aiLoading, setAiLoading] = useState(false);
-  const [aiError, setAiError] = useState<string | undefined>(undefined);
+  const [aiError, setAiError] = useState<string | undefined>();
 
-  // Keep a mutable ref of the search query for event listener callbacks to prevent state-dependency re-runs
+  // Latest values for bridge callbacks, which are registered once.
   const queryRef = useRef(searchQuery);
   useEffect(() => {
     queryRef.current = searchQuery;
   }, [searchQuery]);
+  const fileRequestId = useRef(0);
+  const aiRequested = useRef("");
 
-  // Load history from local storage
   const refreshHistory = () => {
     try {
-      const historyJson = localStorage.getItem("spotlight_history") || "[]";
-      setHistoryList(JSON.parse(historyJson));
+      setHistoryList(JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]"));
     } catch {
       setHistoryList([]);
     }
   };
 
-  // Setup mount-only event listeners to prevent duplicate listener accumulation and performance bottlenecks
+  const requestFiles = useCallback((text: string, mode: "files" | "recent") => {
+    const id = ++fileRequestId.current;
+    if (mode === "recent") bridge.send("recent_files", { id });
+    else bridge.send("search_files", { id, query: text, limit: queryRef.current.trim().startsWith("<") ? 150 : 60 });
+  }, []);
+
+  // ---------------------------------------------------------------- bridge listeners (mount once)
   useEffect(() => {
-    const handleAppsLoaded = (payload: any) => {
-      const formattedApps = payload.map((app: any) => ({
-        type: "app",
-        name: app.Name,
-        path: app.TargetPath,
-        arguments: app.Arguments,
-        icon: app.IconBase64,
-      }));
-      setApps(formattedApps);
+    const onApps = (payload: any[]) => {
+      setApps(
+        payload.map((app) => ({
+          type: "app" as const,
+          id: app.Id,
+          name: app.Name,
+          path: app.TargetPath,
+          arguments: app.Arguments || undefined,
+          icon: app.Icon ? ICON_BASE + app.Icon : undefined,
+          exe: app.Exe || undefined,
+        })),
+      );
     };
 
-    const handleFilesResults = (payload: any) => {
-      const { query, files } = payload;
-      const currentQuery = queryRef.current.trim();
-      const actualFileQuery = currentQuery.startsWith("<") ? currentQuery.slice(1).trim() : currentQuery;
-      
-      // Verify query relevance to ignore stale async file search results
-      if (query.toLowerCase().trim() === actualFileQuery.toLowerCase().trim()) {
-        const formattedFiles = files.map((file: any) => ({
-          type: "file",
-          name: file.Name,
-          path: file.Path,
-          size: file.Size,
-          dateModified: file.DateModified,
-          extension: file.Extension,
-        }));
-        setFileResults(formattedFiles);
-      }
+    const onAppInfo = (info: any) => {
+      setVersion(info.version ?? "");
+      setIndexReady(!!info.indexReady);
     };
 
-    const handleServicesLoaded = (payload: any) => {
-      const formattedServices = payload.map((svc: any) => ({
-        type: "service",
-        name: svc.DisplayName,
-        path: svc.Status,
-        serviceName: svc.Name,
-        displayName: svc.DisplayName,
-        status: svc.Status,
-      }));
-      setServices(formattedServices);
+    const onIndexStatus = (info: any) => {
+      setIndexReady(!!info.ready);
+      // The index finished building while a search was open - repeat it so results appear.
+      const { text, mode } = fileQueryFor(queryRef.current);
+      if (mode !== "none") requestFiles(text, mode);
     };
 
-    const handleClipboardLoaded = (payload: any) => {
-      const formattedClips = payload.map((c: any) => ({
-        type: "clip",
-        name: c.FullText.length > 55 ? c.FullText.slice(0, 55).replace(/\r?\n/g, " ") + "..." : c.FullText.replace(/\r?\n/g, " "),
-        path: c.Timestamp,
-        fullText: c.FullText,
-        timestamp: c.Timestamp
-      }));
-      setClipboardHistory(formattedClips);
+    const onFiles = (payload: any) => {
+      if (payload.id !== fileRequestId.current) return; // a newer search superseded this one
+      setIndexReady(!!payload.ready);
+      setFileResults(
+        payload.files.map((f: any) => ({
+          type: "file" as const,
+          name: f.Name,
+          path: f.Path,
+          size: f.Size,
+          dateModified: f.DateModified,
+          extension: f.Extension,
+          isFolder: !!f.IsFolder,
+          score: f.Score ?? 0,
+        })),
+      );
     };
 
-    const handleGeminiResponse = (payload: any) => {
-      const { query: respQuery, answer: respAnswer, error: respError } = payload;
-      const currentQuery = queryRef.current.trim();
-      if (currentQuery.startsWith("?")) {
-        const actualAIQuery = currentQuery.slice(1).trim();
-        if (actualAIQuery.toLowerCase() === respQuery.toLowerCase()) {
-          setAiLoading(false);
-          if (respError) {
-            setAiError(respError);
-          } else {
-            setAiAnswer(respAnswer);
-          }
-        }
-      }
+    const onServices = (payload: any[]) =>
+      setServices(
+        payload.map((s) => ({
+          type: "service" as const,
+          name: s.DisplayName,
+          path: s.Status,
+          serviceName: s.Name,
+          displayName: s.DisplayName,
+          status: s.Status,
+        })),
+      );
+
+    const onClipboard = (payload: any[]) =>
+      setClipboardHistory(
+        payload.map((c) => {
+          const flat = String(c.FullText).replace(/\s+/g, " ");
+          return {
+            type: "clip" as const,
+            name: flat.length > 70 ? flat.slice(0, 70) + "..." : flat,
+            path: c.Timestamp,
+            fullText: c.FullText,
+            timestamp: c.Timestamp,
+          };
+        }),
+      );
+
+    const onAi = (payload: any) => {
+      const q = queryRef.current.trim();
+      if (!q.startsWith("?") || q.slice(1).trim().toLowerCase() !== String(payload.query).toLowerCase()) return;
+      setAiLoading(false);
+      if (payload.error) setAiError(payload.error);
+      else setAiAnswer(payload.answer);
     };
 
-    const handleWindowShown = () => {
-      setSearchQuery("");
+    const resetForShow = (query: string) => {
+      setSearchQuery(query);
       setFileResults([]);
       setIsActionsOpen(false);
+      setConfirmKey(null);
       refreshHistory();
       window.dispatchEvent(new CustomEvent("window-shown"));
     };
 
-    const handleShowClipboard = () => {
-      setSearchQuery("*");
-      setFileResults([]);
-      setIsActionsOpen(false);
-      window.dispatchEvent(new CustomEvent("window-shown"));
+    const onShown = (p: any) => {
+      if (p?.version) setVersion(p.version);
+      resetForShow("");
     };
+    const onShowClipboard = () => resetForShow("*");
 
-    bridge.on("apps_loaded", handleAppsLoaded);
-    bridge.on("files_results", handleFilesResults);
-    bridge.on("services_loaded", handleServicesLoaded);
-    bridge.on("clipboard_history_loaded", handleClipboardLoaded);
-    bridge.on("gemini_response", handleGeminiResponse);
-    bridge.on("window_shown", handleWindowShown);
-    bridge.on("show_clipboard", handleShowClipboard);
+    const onUpdateAvailable = (p: any) => setUpdate((prev) => (prev?.progress !== undefined ? prev : { version: p.version, notes: p.notes }));
+    const onUpdateProgress = (p: any) => setUpdate((prev) => (prev ? { ...prev, progress: p.percent, error: undefined } : prev));
+    const onUpdateError = (p: any) => setUpdate((prev) => (prev ? { ...prev, progress: undefined, error: p.message } : prev));
 
-    // Run initial Start Menu app scan exactly once on startup
+    const subscriptions: [string, (p: any) => void][] = [
+      ["apps_loaded", onApps],
+      ["app_info", onAppInfo],
+      ["index_status", onIndexStatus],
+      ["files_results", onFiles],
+      ["services_loaded", onServices],
+      ["clipboard_history_loaded", onClipboard],
+      ["gemini_response", onAi],
+      ["window_shown", onShown],
+      ["show_clipboard", onShowClipboard],
+      ["update_available", onUpdateAvailable],
+      ["update_progress", onUpdateProgress],
+      ["update_error", onUpdateError],
+    ];
+    subscriptions.forEach(([type, cb]) => bridge.on(type, cb));
+
     bridge.send("init");
     refreshHistory();
 
-    // Check for latest updates on GitHub Releases
-    fetch("https://api.github.com/repos/Starmarine06/Spotlight/releases/latest")
-      .then((res) => {
-        if (!res.ok) throw new Error("Failed to fetch release");
-        return res.json();
-      })
-      .then((data) => {
-        const latestTag = data.tag_name;
-        if (latestTag) {
-          const cleanLatest = latestTag.replace(/^v/, "");
-          const cleanCurrent = CURRENT_VERSION.replace(/^v/, "");
-          if (cleanLatest !== cleanCurrent) {
-            const zipAsset = data.assets?.find((asset: any) =>
-              asset.name.endsWith(".zip")
-            );
-            if (zipAsset) {
-              setUpdateInfo({
-                version: latestTag,
-                downloadUrl: zipAsset.browser_download_url,
-                notes: data.body || "",
-              });
-            }
-          }
-        }
-      })
-      .catch((err) => console.error("Update check failed:", err));
-
-    return () => {
-      bridge.off("apps_loaded", handleAppsLoaded);
-      bridge.off("files_results", handleFilesResults);
-      bridge.off("services_loaded", handleServicesLoaded);
-      bridge.off("clipboard_history_loaded", handleClipboardLoaded);
-      bridge.off("gemini_response", handleGeminiResponse);
-      bridge.off("window_shown", handleWindowShown);
-      bridge.off("show_clipboard", handleShowClipboard);
-    };
+    return () => subscriptions.forEach(([type, cb]) => bridge.off(type, cb));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Debounced file search
+  // ---------------------------------------------------------------- query-driven effects
   useEffect(() => {
-    const trimmed = searchQuery.trim();
-    
-    // Determine the actual file query based on prefix
-    let fileSearchQuery = "";
-    if (trimmed.startsWith("<")) {
-      fileSearchQuery = trimmed.slice(1).trim();
-    } else if (
-      !trimmed.startsWith(".") &&
-      !trimmed.startsWith("!") &&
-      !trimmed.startsWith(">") &&
-      !trimmed.startsWith(":") &&
-      !trimmed.startsWith("#") &&
-      !trimmed.startsWith("%") &&
-      !trimmed.startsWith("=") &&
-      !trimmed.startsWith("*") &&
-      !trimmed.startsWith("?")
-    ) {
-      fileSearchQuery = trimmed;
-    }
-
-    if (fileSearchQuery.length >= 2) {
-      const handler = setTimeout(() => {
-        bridge.send("search_files", { query: fileSearchQuery });
-      }, 150);
-      return () => clearTimeout(handler);
-    } else {
+    const { text, mode } = fileQueryFor(searchQuery);
+    if (mode === "none") {
+      fileRequestId.current++;
       setFileResults([]);
+      return;
     }
-  }, [searchQuery]);
+    const handle = setTimeout(() => requestFiles(text, mode), 25);
+    return () => clearTimeout(handle);
+  }, [searchQuery, requestFiles]);
 
-  // Reset Gemini AI question search state on query input change
   useEffect(() => {
+    setConfirmKey(null);
     setAiAnswer(undefined);
-    setAiLoading(false);
     setAiError(undefined);
+    setAiLoading(false);
+    aiRequested.current = "";
   }, [searchQuery]);
 
-  // Query Windows Services list exactly once when entering service mode ("!")
+  // "?" web search starts by itself once typing pauses (Enter still works to force it).
   useEffect(() => {
-    if (searchQuery.startsWith("!")) {
-      if (!hasLoadedServices) {
-        bridge.send("get_services");
-        setHasLoadedServices(true);
-      }
-    } else {
-      setHasLoadedServices(false);
-    }
-  }, [searchQuery, hasLoadedServices]);
-
-  // Fetch persisted Clipboard list exactly once when entering clipboard mode ("*")
-  useEffect(() => {
-    if (searchQuery.startsWith("*")) {
-      if (!hasLoadedClipboard) {
-        bridge.send("get_clipboard_history");
-        setHasLoadedClipboard(true);
-      }
-    } else {
-      setHasLoadedClipboard(false);
-    }
-  }, [searchQuery, hasLoadedClipboard]);
-
-  // Compute text hashes asynchronously
-  useEffect(() => {
-    if (searchQuery.startsWith("#")) {
-      const text = searchQuery.slice(1).trim();
-      if (text) {
-        Promise.all([calculateSHA256(text), calculateSHA1(text)]).then(([s256, s1]) => {
-          setHashes({ sha256: s256, sha1: s1 });
-        });
-      } else {
-        setHashes({ sha256: "", sha1: "" });
-      }
-    }
+    const q = searchQuery.trim();
+    if (!q.startsWith("?")) return;
+    const text = q.slice(1).trim();
+    if (text.length < 3) return;
+    const handle = setTimeout(() => {
+      if (aiRequested.current === text) return;
+      aiRequested.current = text;
+      setAiLoading(true);
+      bridge.send("ask_gemini", { query: text });
+    }, 600);
+    return () => clearTimeout(handle);
   }, [searchQuery]);
 
-  // Filter and construct result set
-  const results = useMemo(() => {
-    const query = searchQuery.trim();
-    const list: SearchItem[] = [];
-    const queryLower = query.toLowerCase();
+  useEffect(() => {
+    if (searchQuery.startsWith("!") && !searchQuery.startsWith("!!")) bridge.send("get_services");
+  }, [searchQuery.startsWith("!") && !searchQuery.startsWith("!!")]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // Prepend update card if an update is available and query is empty or relates to updating
-    if (updateInfo && (!query || "update".includes(queryLower) || "version".includes(queryLower))) {
-      list.push({
-        type: "system",
-        name: `✨ Update Available: ${updateInfo.version}`,
-        path: "update-spotlight",
-        command: `update-spotlight:${updateInfo.downloadUrl}`,
-        description: `Install version ${updateInfo.version}. Press Enter to update now.`,
-        iconName: "settings"
-      });
+  useEffect(() => {
+    if (searchQuery.startsWith("*")) bridge.send("get_clipboard_history");
+  }, [searchQuery.startsWith("*")]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!searchQuery.startsWith("#")) return;
+    const text = searchQuery.slice(1).trim();
+    if (!text) {
+      setHashes({ sha256: "", sha1: "" });
+      return;
     }
+    Promise.all([calculateSHA256(text), calculateSHA1(text)]).then(([sha256, sha1]) => setHashes({ sha256, sha1 }));
+  }, [searchQuery]);
 
-    if (!query) {
-      list.push(...apps.slice(0, 5));
-      list.push(...DEFAULT_SYSTEM_ACTIONS.slice(0, 4));
-      return list;
-    }
+  // ---------------------------------------------------------------- results
+  const results = useMemo(
+    () =>
+      buildResults({
+        query: searchQuery,
+        apps,
+        fileResults,
+        services,
+        clipboard: clipboardHistory,
+        history: historyList,
+        hashes,
+        update,
+        ai: { answer: aiAnswer, loading: aiLoading, error: aiError },
+      }),
+    [searchQuery, apps, fileResults, services, clipboardHistory, historyList, hashes, update, aiAnswer, aiLoading, aiError],
+  );
 
-    // 0. AI Mode ("?")
-    if (query.startsWith("?")) {
-      const aiQuery = query.slice(1).trim();
-      return [
-        {
-          type: "ai" as const,
-          name: aiQuery ? `Search Web: "${aiQuery}"` : "Search the web...",
-          path: "",
-          query: aiQuery,
-          answer: aiAnswer,
-          loading: aiLoading,
-          error: aiError,
-        }
-      ];
-    }
-
-    // 1. History mode ("!!")
-    if (query === "!!" || query.startsWith("!!")) {
-      return historyList;
-    }
-
-    // 2. Clipboard mode ("*")
-    if (query.startsWith("*")) {
-      const clipQuery = query.slice(1).trim().toLowerCase();
-      if (!clipQuery) return clipboardHistory;
-      return clipboardHistory.filter((c) =>
-        c.fullText.toLowerCase().includes(clipQuery)
-      );
-    }
-
-    // 3. Command runner mode (">")
-    if (query.startsWith(">")) {
-      const commandText = query.slice(1).trim();
-      const cmdItem: CommandSearchItem = {
-        type: "cmd",
-        name: `Execute command: "${commandText || "ipconfig"}"`,
-        path: "cmd.exe",
-        command: commandText,
-      };
-      return [cmdItem];
-    }
-
-    // 4. Registry mode (":")
-    if (query.startsWith(":")) {
-      const regPath = query.slice(1).trim();
-      const regItem: RegistrySearchItem = {
-        type: "registry",
-        name: `Open Registry Key: "${regPath || "HKCU\\Software"}"`,
-        path: "Registry Editor (regedit)",
-        registryPath: regPath,
-      };
-      return [regItem];
-    }
-
-    // 5. Calculator / Math mode ("=")
-    if (query.startsWith("=")) {
-      const expr = query.slice(1).trim();
-      if (!expr) {
-        return [{
-          type: "calc" as const,
-          name: "Type a mathematical equation",
-          path: "",
-          expression: "e.g. 5*3-2",
-          result: "0",
-        }];
-      }
-      try {
-        const sanitized = expr.replace(/\^/g, "**");
-        const res = new Function(`return (${sanitized})`)();
-        if (typeof res === "number" && !isNaN(res) && isFinite(res)) {
-          return [{
-            type: "calc" as const,
-            name: res.toString(),
-            path: "",
-            expression: expr,
-            result: res.toString(),
-          }];
-        }
-      } catch {
-        // Ignore math exceptions while typing
-      }
-      return [{
-        type: "calc" as const,
-        name: "Evaluating...",
-        path: "",
-        expression: expr,
-        result: "Error",
-      }];
-    }
-
-    // 6. Services mode ("!")
-    if (query.startsWith("!")) {
-      const svcQuery = query.slice(1).trim().toLowerCase();
-      return services.filter((svc) =>
-        svc.displayName.toLowerCase().includes(svcQuery) || svc.serviceName.toLowerCase().includes(svcQuery)
-      );
-    }
-
-    // 7. Settings mode ("%")
-    if (query.startsWith("%") && !query.startsWith("%%")) {
-      const settingsQuery = query.slice(1).trim().toLowerCase();
-      return WINDOWS_SETTINGS.filter((set) =>
-        set.name.toLowerCase().includes(settingsQuery) || set.description.toLowerCase().includes(settingsQuery)
-      );
-    }
-
-    // 8. Hashes mode ("#")
-    if (query.startsWith("#")) {
-      const text = query.slice(1).trim();
-      const sha256Item: CalcSearchItem = {
-        type: "calc",
-        name: hashes.sha256,
-        path: "",
-        expression: `SHA-256 Hash of "${text}"`,
-        result: hashes.sha256,
-      };
-      const sha1Item: CalcSearchItem = {
-        type: "calc",
-        name: hashes.sha1,
-        path: "",
-        expression: `SHA-1 Hash of "${text}"`,
-        result: hashes.sha1,
-      };
-      return [sha256Item, sha1Item];
-    }
-
-    // 9. Unit conversion mode ("%%")
-    if (query.startsWith("%%")) {
-      const convTerm = query.slice(2).trim();
-      const convResult = convertUnits(convTerm);
-      if (convResult) {
-        return [{
-          type: "conversion" as const,
-          name: convResult,
-          path: "",
-          result: convResult,
-        }];
-      } else {
-        return [{
-          type: "conversion" as const,
-          name: `Example: 10 ft to m, 32 f to c`,
-          path: "",
-          result: "No conversion match found",
-        }];
-      }
-    }
-
-    // 10. Files filter ("<")
-    if (query.startsWith("<")) {
-      return fileResults;
-    }
-
-    // 11. Apps filter (".")
-    if (query.startsWith(".")) {
-      const appQuery = query.slice(1).trim();
-      return scoreAndRankApps(apps, appQuery);
-    }
-
-    // NORMAL MODE: Combined search
-
-    // Math evaluation
-    const isMath = /^[0-9+\-*/().\s^%]+$/.test(query) && /[0-9]/.test(query);
-    if (isMath) {
-      try {
-        const sanitized = query.replace(/\^/g, "**");
-        const res = new Function(`return (${sanitized})`)();
-        if (typeof res === "number" && !isNaN(res) && isFinite(res)) {
-          list.push({
-            type: "calc",
-            name: res.toString(),
-            path: "",
-            expression: query,
-            result: res.toString(),
-          });
-        }
-      } catch {
-        // Skip
-      }
-    }
-
-    // Apps filter with fuzzy ranking
-    const rankedApps = scoreAndRankApps(apps, query);
-    list.push(...rankedApps);
-
-    // Files
-    list.push(...fileResults);
-
-    // System commands & Windows Settings
-    const filteredSys = DEFAULT_SYSTEM_ACTIONS.filter((sys) =>
-      sys.name.toLowerCase().includes(queryLower) || sys.description.toLowerCase().includes(queryLower)
-    );
-    list.push(...filteredSys);
-
-    const filteredSettings = WINDOWS_SETTINGS.filter((set) =>
-      set.name.toLowerCase().includes(queryLower) || set.description.toLowerCase().includes(queryLower)
-    );
-    list.push(...filteredSettings);
-
-    // Web Search Options
-    list.push(
-      {
-        type: "web" as const,
-        name: `Search Google for "${query}"`,
-        path: "",
-        query: query,
-        engine: "google" as const,
-      },
-      {
-        type: "web" as const,
-        name: `Search DuckDuckGo for "${query}"`,
-        path: "",
-        query: query,
-        engine: "duckduckgo" as const,
-      }
-    );
-
-    return list;
-  }, [searchQuery, apps, fileResults, services, hashes, clipboardHistory, historyList, aiAnswer, aiLoading, aiError, updateInfo]);
-
-  // Save selection history to localStorage
   const saveToHistory = (item: SearchItem) => {
-    if (["app", "file", "system", "registry", "cmd", "service"].includes(item.type)) {
-      try {
-        const historyJson = localStorage.getItem("spotlight_history") || "[]";
-        let list: SearchItem[] = JSON.parse(historyJson);
-        list = list.filter((i) => i.name !== item.name);
-        list.unshift(item);
-        localStorage.setItem("spotlight_history", JSON.stringify(list.slice(0, 10)));
-      } catch (e) {
-        console.error(e);
-      }
+    if (!["app", "file", "system", "registry", "cmd", "service"].includes(item.type)) return;
+    if (item.type === "system" && item.command.startsWith("update-spotlight")) return;
+    try {
+      const { ranges: _ranges, ...clean } = item as SearchItem & { ranges?: unknown };
+      void _ranges;
+      let list: SearchItem[] = JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
+      list = list.filter((i) => !(i.type === clean.type && i.name === clean.name));
+      list.unshift(clean as SearchItem);
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(list.slice(0, 15)));
+    } catch (e) {
+      console.error(e);
     }
   };
 
-  // Execute selected item actions
-  const executeItem = (item: SearchItem, actionOverride?: string) => {
+  const executeItem = (item: SearchItem, action: string = "open") => {
     if (!item) return;
 
-    const action = actionOverride || "open";
+    // Destructive system actions need a second Enter.
+    if (item.type === "system" && item.confirm && action === "open") {
+      const key = `sys:${item.command}`;
+      if (confirmKey !== key) {
+        setConfirmKey(key);
+        return;
+      }
+    }
 
-    saveToHistory(item);
+    const key = usageKey(item);
+    if (key && action === "open") recordUsage(key, queryRef.current);
+    if (action === "open") saveToHistory(item);
 
-    if (action === "copy_path" && item.path) {
-      bridge.send("copy_clipboard", { text: item.path });
+    if (action === "copy_path") {
+      const text = item.type === "cmd" ? item.command : item.type === "registry" ? item.registryPath : item.path;
+      if (text) bridge.send("copy_clipboard", { text });
+      return;
+    }
+    if (action === "copy_name") {
+      bridge.send("copy_clipboard", { text: item.name });
       return;
     }
 
-    if (item.type === "app") {
-      bridge.send("launch", { path: item.path, arguments: item.arguments });
-    } else if (item.type === "file") {
-      if (action === "show_explorer") {
-        bridge.send("show_in_explorer", { path: item.path });
-      } else {
-        bridge.send("launch", { path: item.path });
+    switch (item.type) {
+      case "app":
+        if (action === "show_explorer") bridge.send("show_in_explorer", { path: item.path });
+        else if (action === "run_admin") bridge.send("launch", { path: item.path, arguments: item.arguments, admin: true });
+        else bridge.send("launch", { path: item.path, arguments: item.arguments });
+        break;
+
+      case "file":
+        if (action === "show_explorer") bridge.send("show_in_explorer", { path: item.path });
+        else bridge.send("launch", { path: item.path });
+        break;
+
+      case "system":
+        if (item.command === "update-spotlight") {
+          setUpdate((prev) => (prev ? { ...prev, progress: 0, error: undefined } : prev));
+          bridge.send("install_update");
+        } else if (item.command.startsWith("path:")) {
+          bridge.send("launch", { path: item.command.slice(5) });
+        } else if (item.command.startsWith("ms-settings:")) {
+          bridge.send("launch", { path: item.command });
+        } else {
+          bridge.send("system", { command: item.command });
+        }
+        break;
+
+      case "calc":
+        bridge.send("copy_clipboard", { text: item.result });
+        break;
+
+      case "conversion":
+        bridge.send("copy_clipboard", { text: item.copy ?? item.result });
+        break;
+
+      case "web": {
+        const encoded = encodeURIComponent(item.query);
+        const url =
+          item.engine === "url" ? item.url! : item.engine === "google" ? `https://www.google.com/search?q=${encoded}` : `https://duckduckgo.com/?q=${encoded}`;
+        bridge.send("launch", { path: url });
+        break;
       }
-    } else if (item.type === "system") {
-      if (item.command.startsWith("update-spotlight:")) {
-        const downloadUrl = item.command.replace("update-spotlight:", "");
-        bridge.send("trigger_update", { downloadUrl });
-      } else if (item.command.startsWith("ms-settings:")) {
-        bridge.send("launch", { path: item.command });
-      } else {
-        bridge.send("system", { command: item.command });
-      }
-    } else if (item.type === "calc") {
-      bridge.send("copy_clipboard", { text: item.result });
-    } else if (item.type === "web") {
-      const encoded = encodeURIComponent(item.query);
-      const url =
-        item.engine === "google"
-          ? `https://www.google.com/search?q=${encoded}`
-          : `https://duckduckgo.com/?q=${encoded}`;
-      bridge.send("launch", { path: url });
-    } else if (item.type === "cmd") {
-      bridge.send("run_cmd", { command: item.command || "cmd.exe" });
-    } else if (item.type === "registry") {
-      bridge.send("open_registry", { path: item.registryPath || "HKCU\\Software" });
-    } else if (item.type === "service") {
-      const serviceAction = actionOverride || (item.status === "Running" ? "stop" : "start");
-      bridge.send("control_service", { serviceName: item.serviceName, action: serviceAction });
-    } else if (item.type === "conversion") {
-      bridge.send("copy_clipboard", { text: item.result });
-    } else if (item.type === "clip") {
-      if (action === "delete") {
-        bridge.send("delete_clipboard_item", { text: item.fullText });
-      } else if (action === "clear_history") {
-        bridge.send("clear_clipboard_history");
-      } else if (action === "copy_text") {
-        bridge.send("copy_clipboard", { text: item.fullText });
-      } else {
-        // Default action is to close and paste
-        bridge.send("paste_clip", { text: item.fullText });
-      }
-    } else if (item.type === "ai") {
-      if (item.answer) {
-        bridge.send("copy_clipboard", { text: item.answer });
-      } else if (!item.loading && item.query && item.query.trim().length >= 3) {
-        setAiLoading(true);
-        setAiError(undefined);
-        bridge.send("ask_gemini", { query: item.query });
-      }
+
+      case "cmd":
+        bridge.send("run_cmd", { command: item.command || "cmd.exe" });
+        break;
+
+      case "registry":
+        bridge.send("open_registry", { path: item.registryPath || "HKCU\\Software" });
+        break;
+
+      case "service":
+        bridge.send("control_service", { serviceName: item.serviceName, action: action === "open" ? (item.status === "Running" ? "stop" : "start") : action });
+        break;
+
+      case "clip":
+        if (action === "delete") bridge.send("delete_clipboard_item", { text: item.fullText });
+        else if (action === "clear_history") bridge.send("clear_clipboard_history");
+        else if (action === "copy_text") bridge.send("copy_clipboard", { text: item.fullText });
+        else bridge.send("paste_clip", { text: item.fullText });
+        break;
+
+      case "ai":
+        if (item.answer) {
+          bridge.send("copy_clipboard", { text: item.answer });
+        } else if (!item.loading && item.query.trim().length >= 2) {
+          aiRequested.current = item.query.trim();
+          setAiLoading(true);
+          setAiError(undefined);
+          bridge.send("ask_gemini", { query: item.query });
+        }
+        break;
     }
   };
 
-  // Keyboard navigation
-  const { activeIndex, setActiveIndex } = useKeyboard(
-    results.length,
-    (index) => executeItem(results[index]),
-    () => results.length > 0 && setIsActionsOpen(!isActionsOpen),
-    () => bridge.send("hide")
-  );
+  const { activeIndex, setActiveIndex } = useKeyboard({
+    itemCount: results.length,
+    resetKey: searchQuery,
+    onExecute: (index, secondary) => {
+      const item = results[index];
+      if (!item) return;
+      if (secondary) executeItem(item, item.type === "file" || item.type === "app" ? "show_explorer" : "copy_path");
+      else executeItem(item);
+    },
+    onToggleActions: () => results.length > 0 && setIsActionsOpen((open) => !open),
+    onEscape: () => {
+      if (isActionsOpen) setIsActionsOpen(false);
+      else if (searchQuery) setSearchQuery("");
+      else bridge.send("hide");
+    },
+  });
 
   const activeItem = results[activeIndex] || null;
+  const activeKey = activeItem && activeItem.type === "system" && activeItem.confirm ? `sys:${activeItem.command}` : null;
+  // Moving the selection cancels a pending confirmation.
+  useEffect(() => {
+    if (confirmKey && confirmKey !== activeKey) setConfirmKey(null);
+  }, [activeKey, confirmKey]);
+
+  const showFileHint = !indexReady && fileQueryFor(searchQuery).mode !== "none";
 
   return (
     <div className="app-container">
-      <SearchBar
-        value={searchQuery}
-        onChange={setSearchQuery}
-        onFocus={() => setIsActionsOpen(false)}
-      />
+      <SearchBar value={searchQuery} onChange={setSearchQuery} onFocus={() => setIsActionsOpen(false)} />
 
       <div className="app-body">
         <ResultList
           items={results}
           activeIndex={activeIndex}
+          confirmKey={confirmKey}
+          query={searchQuery}
           onItemClick={(index) => {
             setActiveIndex(index);
             executeItem(results[index]);
           }}
+          onItemHover={setActiveIndex}
         />
 
         <PreviewPane item={activeItem} />
@@ -647,18 +418,22 @@ export default function App() {
       <footer className="app-footer">
         <div className="footer-shortcuts">
           <div className="shortcut-item">
-            <kbd>Esc</kbd> <span>Close</span>
+            <kbd>Esc</kbd> <span>{searchQuery ? "Clear" : "Close"}</span>
           </div>
           <div className="shortcut-item">
             <kbd>↑↓</kbd> <span>Navigate</span>
           </div>
           <div className="shortcut-item">
-            <kbd>↵</kbd> <span>Open / Paste</span>
+            <kbd>↵</kbd> <span>Open</span>
           </div>
+          {showFileHint && <div className="shortcut-item index-hint">Indexing files...</div>}
         </div>
-        <div className="action-trigger" onClick={() => setIsActionsOpen(true)}>
-          <span>Actions</span>
-          <kbd>Ctrl+K</kbd>
+        <div className="footer-right">
+          {version && <span className="version-tag">v{version}</span>}
+          <div className="action-trigger" onClick={() => setIsActionsOpen(true)}>
+            <span>Actions</span>
+            <kbd>Ctrl+K</kbd>
+          </div>
         </div>
       </footer>
 

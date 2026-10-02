@@ -175,7 +175,7 @@ export const PreviewPane: React.FC<PreviewPaneProps> = ({ item }) => {
             <div className="preview-large-icon">
               {item.type === "app" ? (
                 item.icon ? (
-                  <img src={`data:image/png;base64,${item.icon}`} alt={item.name} />
+                  <img src={item.icon} alt={item.name} />
                 ) : (
                   <svg fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
@@ -240,8 +240,8 @@ export const PreviewPane: React.FC<PreviewPaneProps> = ({ item }) => {
                   <span className="preview-detail-value">{item.path}</span>
                 </div>
                 <div className="preview-detail-item">
-                  <span className="preview-detail-label">File Size</span>
-                  <span className="preview-detail-value">{formatBytes(item.size)}</span>
+                  <span className="preview-detail-label">{item.isFolder ? "Type" : "File Size"}</span>
+                  <span className="preview-detail-value">{item.isFolder ? "Folder" : formatBytes(item.size)}</span>
                 </div>
                 <div className="preview-detail-item">
                   <span className="preview-detail-label">Last Modified</span>
@@ -338,7 +338,7 @@ export const PreviewPane: React.FC<PreviewPaneProps> = ({ item }) => {
                 <div className="preview-detail-item">
                   <span className="preview-detail-label">Search Provider</span>
                   <span className="preview-detail-value">
-                    {item.engine === "google" ? "Google Search" : "DuckDuckGo"}
+                    {item.engine === "google" ? "Google Search" : item.engine === "url" ? "Open link in browser" : "DuckDuckGo"}
                   </span>
                 </div>
               </>
