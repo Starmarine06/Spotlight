@@ -47,7 +47,7 @@ Spotlight is a keyboard-driven search and command launcher for Windows, inspired
 
 ## Install and update
 
-Download **`SpotlightSetup.exe`** and run it. It needs no administrator rights: it installs to `%LOCALAPPDATA%\Spotlight`, adds a Start Menu shortcut and a startup entry, and launches Spotlight. (Requires the [.NET 9 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/9.0) and the Edge WebView2 Runtime, which Windows 11 includes.)
+Download **[`SpotlightSetup.exe`](https://github.com/Starmarine06/Spotlight/releases/latest/download/SpotlightSetup.exe)** from the [latest release](https://github.com/Starmarine06/Spotlight/releases/latest) and run it. It needs no administrator rights: it installs to `%LOCALAPPDATA%\Spotlight`, adds a Start Menu shortcut and a startup entry, and launches Spotlight. (Requires the [.NET 9 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/9.0) and the Edge WebView2 Runtime, which Windows 11 includes.)
 
 **Updates are a real replace, not an overlay.** Spotlight checks GitHub Releases at startup and every 6 hours; an *Update available* card appears at the top of the launcher. Pressing Enter:
 
@@ -96,3 +96,7 @@ For UI development run `npm run dev` in `src/Spotlight.UI` (a mock host serves s
 ---
 
 > Spotlight keeps clipboard history and settings only on your machine. The only network traffic is the update check against GitHub and the optional `?` web lookup.
+
+## License
+
+[MIT](LICENSE)
